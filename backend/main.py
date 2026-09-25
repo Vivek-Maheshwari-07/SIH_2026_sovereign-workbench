@@ -26,6 +26,7 @@ from backend import echo_agent
 from backend.file_store import file_store
 from backend.registry import registry
 from backend.tools.files import FileSafetyError
+from backend.tools.sandbox import sandbox_available
 from backend.router import route as run_router
 from backend.settings import settings
 from backend.task_store import task_store
@@ -151,9 +152,9 @@ def _check_ollama() -> bool:
 
 
 def _check_docker() -> bool:
+    """Docker reachable AND the sandbox image present (same check the code flow relies on)."""
     try:
-        proc = subprocess.run(["docker", "info"], capture_output=True, timeout=5.0)
-        return proc.returncode == 0
+        return sandbox_available()
     except Exception:
         return False
 

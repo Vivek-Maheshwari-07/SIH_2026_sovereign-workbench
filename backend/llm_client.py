@@ -43,6 +43,7 @@ class LLMError(Exception):
 class ChatResult:
     text: str
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    tokens_out: Optional[int] = None     # Ollama's eval_count; None when Ollama does not report it
 
 
 def _resolve(path: Path) -> Path:
@@ -64,6 +65,12 @@ def _load_embed_model_name() -> str:
         if entry.get("embedding"):
             return entry["ollama_name"]
     raise LLMError("MODEL_UNAVAILABLE", f"No embedding model configured in {models_path}")
+
+
+def _tokens_out(response: Any) -> Optional[int]:
+    """Output token count Ollama reported (eval_count), or None if it did not report one."""
+    count = getattr(response, "eval_count", None)
+    return count if isinstance(count, int) else None
 
 
 def parse_fallback_tool_call(text: str) -> Optional[dict[str, Any]]:
@@ -200,7 +207,7 @@ def chat(
         detail={"purpose": purpose, "tokens_out": response.eval_count},
     )
 
-    return ChatResult(text=text, tool_calls=tool_calls)
+    return ChatResult(text=text, tool_calls=tool_calls, tokens_out=_tokens_out(response))
 
 
 def chat_json(

@@ -274,3 +274,14 @@ def test_cancel_queued_task_sets_cancelled(client: TestClient):
     page = EventsPage.model_validate(resp.json())
     assert page.events == []
     assert page.done is True
+
+
+def test_health_reports_sandbox_down_when_unavailable(client: TestClient, monkeypatch):
+    from backend import main
+
+    monkeypatch.setattr(main, "sandbox_available", lambda: False)
+    resp = client.get(f"{API_PREFIX}/health")
+    assert resp.status_code == 200
+    health = HealthResponse.model_validate(resp.json())
+    assert health.sandbox_ok is False
+    assert health.status in ("degraded", "down")

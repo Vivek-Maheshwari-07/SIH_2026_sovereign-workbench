@@ -6,6 +6,9 @@ import pytest
 import yaml
 from PIL import Image, ImageDraw
 
+from types import SimpleNamespace
+
+from backend import llm_client
 from backend.llm_client import chat, chat_json, embed, parse_fallback_tool_call
 from backend.settings import settings
 from shared.contracts import ApprovalNote
@@ -59,12 +62,40 @@ def test_fallback_parser_returns_none_for_empty_text():
     assert parse_fallback_tool_call("") is None
 
 
+# ---------------------------------------------------------------- tokens_out (no Ollama)
+class _FakeOllamaClient:
+    def __init__(self, response):
+        self.response = response
+
+    def chat(self, **kwargs):
+        return self.response
+
+
+def _fake_response(eval_count):
+    message = SimpleNamespace(content="ready", tool_calls=None)
+    return SimpleNamespace(message=message, eval_count=eval_count)
+
+
+def test_chat_returns_eval_count_as_tokens_out(monkeypatch):
+    monkeypatch.setattr(llm_client, "_client", lambda: _FakeOllamaClient(_fake_response(42)))
+    result = chat("any-model", [{"role": "user", "content": "hi"}])
+    assert result.text == "ready"
+    assert result.tokens_out == 42
+
+
+def test_chat_tokens_out_is_none_when_ollama_omits_it(monkeypatch):
+    monkeypatch.setattr(llm_client, "_client", lambda: _FakeOllamaClient(_fake_response(None)))
+    result = chat("any-model", [{"role": "user", "content": "hi"}])
+    assert result.tokens_out is None
+
+
 # ---------------------------------------------------------------- live tests (need Ollama)
 @skip_if_no_ollama
 def test_chat_returns_non_empty_text():
     model = _model_name("general")
     result = chat(model, [{"role": "user", "content": "Reply with exactly one word: ready"}])
     assert result.text.strip() != ""
+    assert isinstance(result.tokens_out, int) and result.tokens_out > 0
 
 
 @skip_if_no_ollama
