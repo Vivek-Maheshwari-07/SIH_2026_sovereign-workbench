@@ -182,6 +182,8 @@ def test_cost_text_rules():
     assert cost_text("₹ 2 lakh", "budget ₹ 3 lakh") == COST_PLACEHOLDER
     assert cost_text("Within approved maintenance budget", None) == "Within approved maintenance budget"
     assert cost_text("USD 1,200", "quote USD 1200") == "USD 1,200"
+    assert cost_text("Rs 4,50,000.00", "Rs 4,50,000") == "Rs 4,50,000.00"
+    assert cost_text("Rs 4.5 lakh", "Rs 4,50,000") == COST_PLACEHOLDER      # lakh/crore words not converted
 
 
 def test_split_sop_reference():

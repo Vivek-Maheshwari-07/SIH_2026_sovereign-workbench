@@ -210,6 +210,13 @@ def chat(
     return ChatResult(text=text, tool_calls=tool_calls, tokens_out=_tokens_out(response))
 
 
+@dataclass
+class JsonResult:
+    value: BaseModel
+    tokens_out: Optional[int] = None     # eval_count of the accepted reply; None if Ollama did not report it
+    duration_ms: int = 0                 # total time of all attempts
+
+
 def chat_json(
     model_id: str,
     messages: list[dict[str, Any]],
@@ -217,6 +224,17 @@ def chat_json(
     *,
     purpose: str = "chat_json",
 ) -> BaseModel:
+    """Like chat_json_meta() but returns only the validated model."""
+    return chat_json_meta(model_id, messages, schema, purpose=purpose).value
+
+
+def chat_json_meta(
+    model_id: str,
+    messages: list[dict[str, Any]],
+    schema: type[BaseModel],
+    *,
+    purpose: str = "chat_json",
+) -> JsonResult:
     """
     Like chat(), but forces the reply into `schema`'s JSON schema (via
     Ollama's `format` parameter) and validates it with the Pydantic model.
@@ -237,8 +255,10 @@ def chat_json(
         )
 
     last_error: Optional[Exception] = None
+    total_ms = 0
     for attempt in range(2):
         response, duration_ms = _call_with_retry(_do_call, purpose=purpose, model_id=model_id)
+        total_ms += duration_ms
         content = response.message.content or ""
         try:
             result = schema.model_validate_json(content)
@@ -273,7 +293,7 @@ def chat_json(
             ok=True,
             detail={"purpose": purpose, "tokens_out": response.eval_count},
         )
-        return result
+        return JsonResult(value=result, tokens_out=_tokens_out(response), duration_ms=total_ms)
 
     raise LLMError(
         "BAD_MODEL_OUTPUT",
