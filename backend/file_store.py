@@ -1,12 +1,11 @@
 """
-Minimal file store for Track A (ticket A4 will harden this: dedup, cleanup,
-bigger file-type sniffing). Saves uploads under workspace/<file_id>/<name>
-and keeps an in-memory file_id -> FileRef + saved path registry, protected
-by a lock.
+Minimal file store for Track A: an in-memory file_id -> FileRef + saved-path
+registry. Upload validation (size, allowed type, magic bytes, filename
+sanitization) all lives in backend.tools.files (ticket A4) — this module
+just persists whatever that module already approved.
 """
 from __future__ import annotations
 
-import mimetypes
 import secrets
 import threading
 from dataclasses import dataclass
@@ -16,27 +15,32 @@ from typing import Optional
 import pymupdf
 
 from backend.settings import settings
-from shared.contracts import ERROR_CODES, FileRef
+from backend.tools.files import IMAGE_SUFFIXES, validate_upload
+from shared.contracts import FileRef
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-
-SUPPORTED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".txt", ".md", ".py", ".csv", ".xlsx", ".docx"}
-_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 _PDF_PAGES_TO_CHECK = 3
 
-
-class FileStoreError(Exception):
-    """Raised for a bad upload. `code` is a key from shared.contracts.ERROR_CODES."""
-
-    def __init__(self, code: str, message: Optional[str] = None) -> None:
-        if code not in ERROR_CODES:
-            raise ValueError(f"unknown error code: {code}")
-        super().__init__(message or ERROR_CODES[code])
-        self.code = code
+_MIME_TYPES = {
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".py": "text/x-python",
+    ".csv": "text/csv",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
 
 
 def _resolve(path: Path) -> Path:
     return path if path.is_absolute() else _REPO_ROOT / path
+
+
+def _guess_mime(suffix: str) -> str:
+    return _MIME_TYPES.get(suffix, "application/octet-stream")
 
 
 def new_file_id() -> str:
@@ -70,22 +74,16 @@ class FileStore:
         self._files: dict[str, _StoredFile] = {}
 
     def save(self, filename: str, content: bytes, content_type: Optional[str] = None) -> FileRef:
-        suffix = Path(filename).suffix.lower()
-        if suffix not in SUPPORTED_SUFFIXES:
-            raise FileStoreError("UNSUPPORTED_FILE")
-
-        max_bytes = settings.WB_MAX_UPLOAD_MB * 1024 * 1024
-        if len(content) > max_bytes:
-            raise FileStoreError("FILE_TOO_LARGE")
+        safe_name, suffix = validate_upload(filename, content)  # raises FileSafetyError
 
         file_id = new_file_id()
         dest_dir = _resolve(settings.WB_WORKSPACE_DIR) / file_id
         dest_dir.mkdir(parents=True, exist_ok=True)
-        dest_path = dest_dir / filename
+        dest_path = dest_dir / safe_name
         dest_path.write_bytes(content)
 
-        mime_type = content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        is_image = suffix in _IMAGE_SUFFIXES
+        mime_type = content_type or _guess_mime(suffix)
+        is_image = suffix in IMAGE_SUFFIXES
         pages: Optional[int] = None
         has_text_layer: Optional[bool] = None
         if suffix == ".pdf":
@@ -93,7 +91,7 @@ class FileStore:
 
         ref = FileRef(
             file_id=file_id,
-            filename=filename,
+            filename=safe_name,
             mime_type=mime_type,
             size_bytes=len(content),
             is_image=is_image,

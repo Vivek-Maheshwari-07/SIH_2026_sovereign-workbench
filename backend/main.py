@@ -23,8 +23,9 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend import echo_agent
-from backend.file_store import FileStoreError, file_store
+from backend.file_store import file_store
 from backend.registry import registry
+from backend.tools.files import FileSafetyError
 from backend.router import route as run_router
 from backend.settings import settings
 from backend.task_store import task_store
@@ -202,7 +203,7 @@ async def post_files(file: UploadFile = File(...)) -> FileRef:
     content = await file.read()
     try:
         return file_store.save(file.filename or "upload", content, file.content_type)
-    except FileStoreError as exc:
+    except FileSafetyError as exc:
         status_code = 413 if exc.code == "FILE_TOO_LARGE" else 415
         raise HTTPException(status_code=status_code, detail={"code": exc.code, "message": str(exc)})
 
