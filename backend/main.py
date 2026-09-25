@@ -25,6 +25,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from backend import echo_agent
 from backend.file_store import file_store
 from backend.registry import registry
+from backend.llm_client import LLMError
+from backend.tools import knowledge
 from backend.tools.files import FileSafetyError
 from backend.tools.sandbox import sandbox_available
 from backend.router import route as run_router
@@ -167,6 +169,14 @@ def _check_tesseract() -> bool:
         return False
 
 
+def _kb_chunks() -> int:
+    try:
+        return knowledge.stats().chunks
+    except Exception:
+        logger.warning("knowledge base stats unavailable for /api/health", exc_info=True)
+        return 0
+
+
 @app.get(f"{API_PREFIX}/health", response_model=HealthResponse)
 async def get_health() -> HealthResponse:
     ollama_ok = _check_ollama()
@@ -187,7 +197,7 @@ async def get_health() -> HealthResponse:
         ollama_ok=ollama_ok,
         sandbox_ok=sandbox_ok,
         tesseract_ok=tesseract_ok,
-        kb_chunks=0,  # TODO(A6): real chunk count once the knowledge base exists
+        kb_chunks=_kb_chunks(),
         models=registry.all_models(),
         time=datetime.now(timezone.utc),
     )
@@ -291,15 +301,18 @@ async def post_network_probe(payload: ProbeRequest) -> ProbeResult:
 
 
 @app.get(f"{API_PREFIX}/kb/stats", response_model=KBStats)
-async def get_kb_stats() -> KBStats:
-    # TODO(A6): real ChromaDB-backed stats.
-    return KBStats(documents=0, chunks=0, embed_model=registry.embedding_model().ollama_name)
+def get_kb_stats() -> KBStats:
+    return knowledge.stats()
 
 
 @app.post(f"{API_PREFIX}/kb/search", response_model=KBSearchResponse)
-async def post_kb_search(payload: KBSearchRequest) -> KBSearchResponse:
-    # TODO(A6): real ChromaDB similarity search.
-    return KBSearchResponse(hits=[])
+def post_kb_search(payload: KBSearchRequest) -> KBSearchResponse:
+    try:
+        hits = knowledge.search(payload.query, payload.top_k)
+    except LLMError as exc:
+        status = 504 if exc.code == "MODEL_TIMEOUT" else 503
+        raise HTTPException(status_code=status, detail={"code": exc.code, "message": str(exc)}) from exc
+    return KBSearchResponse(hits=hits)
 
 
 @app.post(f"{API_PREFIX}/admin/prewarm", response_model=PrewarmResult)
