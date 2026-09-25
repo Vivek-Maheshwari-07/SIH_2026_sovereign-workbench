@@ -5,18 +5,26 @@ not reachable.
 """
 from __future__ import annotations
 
-from pathlib import Path
+from io import BytesIO
 
 import httpx
 import pytest
 from PIL import Image
 
 import backend.router as router_module
+from backend.file_store import file_store
 from backend.llm_client import LLMError, embed
 from backend.registry import registry
 from backend.router import cosine_similarity, route
 from backend.settings import settings
 from shared.contracts import RouteRequest, TaskType
+
+
+def _save_test_image(filename: str = "photo.png") -> str:
+    """Saves a tiny in-memory PNG through file_store and returns its file_id."""
+    buf = BytesIO()
+    Image.new("RGB", (40, 40), color="white").save(buf, format="PNG")
+    return file_store.save(filename, buf.getvalue(), "image/png").file_id
 
 
 def _ollama_available() -> bool:
@@ -145,11 +153,10 @@ def test_accuracy_prompts_are_not_copies_of_yaml_examples():
 
 
 # ---------------------------------------------------------------- rule layer (no Ollama)
-def test_rule_layer_image_attachment_routes_to_vision(tmp_path: Path):
-    image_path = tmp_path / "photo.png"
-    Image.new("RGB", (40, 40), color="white").save(image_path)
+def test_rule_layer_image_attachment_routes_to_vision():
+    file_id = _save_test_image()
 
-    decision = route(RouteRequest(message="What is this?", file_ids=[str(image_path)]))
+    decision = route(RouteRequest(message="What is this?", file_ids=[file_id]))
 
     assert decision.task_type == TaskType.VISION
     assert decision.layer == "rule"
@@ -181,14 +188,13 @@ def test_ollama_down_falls_back_to_default_with_clear_reason(monkeypatch):
 
 # ---------------------------------------------------------------- accuracy (needs Ollama)
 @skip_if_no_ollama
-def test_router_accuracy_23_prompts(tmp_path: Path):
-    image_path = tmp_path / "pid_snippet.png"
-    Image.new("RGB", (240, 100), color="white").save(image_path)
+def test_router_accuracy_23_prompts():
+    file_id = _save_test_image("pid_snippet.png")
 
     rows: list[dict] = []
     correct = 0
     for message, expected, needs_image in ACCURACY_CASES:
-        file_ids = [str(image_path)] if needs_image else []
+        file_ids = [file_id] if needs_image else []
         decision = route(RouteRequest(message=message, file_ids=file_ids))
         ok = decision.task_type == expected
         correct += int(ok)

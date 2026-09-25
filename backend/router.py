@@ -2,36 +2,19 @@
 3-layer task router: hard rules -> embedding similarity -> default.
 
 Model names always come from backend.registry, never hard-coded here
-(AGENTS.md rule 6).
-
-NOTE on file_ids: shared.contracts.RouteRequest only carries opaque
-`file_ids: list[str]`. There is no file-storage ticket yet that turns a
-file_id into a FileRef (is_image / has_text_layer), so for now this router
-treats each file_id as a filesystem path (resolved against the repo root if
-relative) and inspects it directly with PyMuPDF. Once a real file store
-exists, `_inspect_attachments` should be rewritten to look files up there
-instead of touching the filesystem.
-
-TODO(A3/A4): replace `_inspect_attachments`'s filesystem-path treatment of
-file_ids with a real lookup against the FileRef store once the file-upload
-ticket lands. This is an interim decision made in ticket A2, not the final
-design.
+(AGENTS.md rule 6). File attachments are looked up through backend.file_store
+(ticket A3), which resolves a file_id to a real FileRef (is_image /
+has_text_layer).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
-import pymupdf
-
+from backend.file_store import file_store
 from backend.llm_client import LLMError, embed
 from backend.registry import registry
 from shared.contracts import RouteDecision, RouteRequest, TaskType
-
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
-_PDF_PAGES_TO_CHECK = 3
 
 # Lazily built and cached in memory on first use:
 # {task_type_str: [(example_text, vector), ...]}
@@ -49,42 +32,17 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
-def _resolve_file_path(file_id: str) -> Path:
-    path = Path(file_id)
-    return path if path.is_absolute() else _REPO_ROOT / path
-
-
-def _is_scanned_pdf(path: Path) -> bool:
-    """A PDF with no extractable text on any of its first few pages."""
-    try:
-        doc = pymupdf.open(path)
-    except Exception:
-        return False
-    try:
-        pages = [doc[i] for i in range(min(_PDF_PAGES_TO_CHECK, doc.page_count))]
-        return bool(pages) and all(not page.get_text().strip() for page in pages)
-    finally:
-        doc.close()
-
-
 def _inspect_attachments(file_ids: list[str]) -> tuple[bool, bool]:
-    """
-    Returns (has_image, has_scanned_pdf) for the given file_ids.
-
-    TODO(A3/A4): file_ids are treated as filesystem paths here because no
-    FileRef store exists yet. Replace this filesystem lookup with a real
-    FileRef lookup (is_image / has_text_layer) once ticket A3/A4 builds it.
-    """
+    """Returns (has_image, has_scanned_pdf) for the given file_ids, via file_store."""
     has_image = False
     has_scanned_pdf = False
     for file_id in file_ids:
-        path = _resolve_file_path(file_id)
-        if not path.exists() or not path.is_file():
+        ref = file_store.get_ref(file_id)
+        if ref is None:
             continue
-        suffix = path.suffix.lower()
-        if suffix in _IMAGE_SUFFIXES:
+        if ref.is_image:
             has_image = True
-        elif suffix == ".pdf" and _is_scanned_pdf(path):
+        elif ref.has_text_layer is False:
             has_scanned_pdf = True
     return has_image, has_scanned_pdf
 
