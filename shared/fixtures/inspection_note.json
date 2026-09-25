@@ -1,0 +1,58 @@
+{
+  "scenario": "inspection_note",
+  "release_every_s": 1.5,
+  "file": {
+    "file_id": "f_000000000001",
+    "filename": "inspection_report_scanned.pdf",
+    "mime_type": "application/pdf",
+    "size_bytes": 842113,
+    "is_image": false,
+    "pages": 2,
+    "has_text_layer": false
+  },
+  "route": {
+    "task_type": "document",
+    "model_id": "general",
+    "ollama_name": "qwen3.5:4b",
+    "reason": "Scanned PDF -> OCR + document agent",
+    "layer": "rule",
+    "confidence": 1.0
+  },
+  "plan": [
+    {"index": 1, "title": "Read the scanned report (OCR)", "tool": "read_document"},
+    {"index": 2, "title": "Extract findings as structured data", "tool": null},
+    {"index": 3, "title": "Check SOP for repair criteria", "tool": "search_knowledge"},
+    {"index": 4, "title": "Fill approval note", "tool": null},
+    {"index": 5, "title": "Generate Word file", "tool": "make_word"}
+  ],
+  "events": [
+    {"type": "route", "step": null, "title": "Routed to general (qwen3.5:4b)", "data": {"decision": "$route"}},
+    {"type": "plan", "step": null, "title": "Plan with 5 steps", "data": {"steps": "$plan"}},
+    {"type": "step_start", "step": 1, "title": "Read the scanned report (OCR)", "data": {"index": 1, "title": "Read the scanned report (OCR)"}},
+    {"type": "tool_call", "step": 1, "title": "read_document", "data": {"tool": "read_document", "args": {"file_id": "f_000000000001"}}},
+    {"type": "tool_result", "step": 1, "title": "2 pages read, 1,412 words", "data": {"tool": "read_document", "ok": true, "summary": "2 pages OCR'd with Tesseract, 1,412 words", "duration_ms": 3120}},
+    {"type": "step_start", "step": 2, "title": "Extract findings as structured data", "data": {"index": 2, "title": "Extract findings as structured data"}},
+    {"type": "llm_call", "step": 2, "title": "Extracted 3 findings", "data": {"model_id": "general", "purpose": "extract_findings", "duration_ms": 21400, "tokens_out": 310}},
+    {"type": "step_start", "step": 3, "title": "Check SOP for repair criteria", "data": {"index": 3, "title": "Check SOP for repair criteria"}},
+    {"type": "tool_call", "step": 3, "title": "search_knowledge", "data": {"tool": "search_knowledge", "args": {"query": "minimum wall thickness repair criteria storage tank"}}},
+    {"type": "tool_result", "step": 3, "title": "4 SOP passages found", "data": {"tool": "search_knowledge", "ok": true, "summary": "Top hit: SOP-INSP-012 p.4 (score 0.81)", "duration_ms": 640}},
+    {"type": "step_start", "step": 4, "title": "Fill approval note", "data": {"index": 4, "title": "Fill approval note"}},
+    {"type": "llm_call", "step": 4, "title": "Approval note drafted", "data": {"model_id": "general", "purpose": "fill_approval_note", "duration_ms": 28700, "tokens_out": 520}},
+    {"type": "step_start", "step": 5, "title": "Generate Word file", "data": {"index": 5, "title": "Generate Word file"}},
+    {"type": "tool_call", "step": 5, "title": "make_word", "data": {"tool": "make_word", "args": {"template": "approval_note.docx"}}},
+    {"type": "artifact", "step": 5, "title": "Approval_Note_INSP-2026-001.docx", "data": {"artifact": "$artifact"}},
+    {"type": "final", "step": null, "title": "Done", "data": {"answer": "Approval note drafted with 3 findings (1 high). Recommendation: repair shell course 2 before next run. File: Approval_Note_INSP-2026-001.docx"}}
+  ],
+  "artifact": {
+    "artifact_id": "a_000000000001",
+    "task_id": "$task_id",
+    "filename": "Approval_Note_INSP-2026-001.docx",
+    "kind": "docx",
+    "size_bytes": 18422,
+    "created_at": "$now",
+    "download_url": "/api/artifacts/a_000000000001",
+    "preview": "Subject: Approval for repair of Tank T-104 shell course 2. Findings: (1) HIGH wall thinning 6.1 mm vs 8.0 mm nominal ..."
+  },
+  "artifact_file": "shared/fixtures/files/Approval_Note_sample.docx",
+  "final_answer": "Approval note drafted with 3 findings (1 high). Recommendation: repair shell course 2 before next run. File: Approval_Note_INSP-2026-001.docx"
+}

@@ -1,0 +1,39 @@
+# Top-level deps only. NEVER install from this file after Day 0.
+# Day 0: Dev A runs `pip install -r requirements.in` then `pip freeze > requirements.lock.txt`
+# and commits the lock. Everyone installs ONLY from requirements.lock.txt.
+
+# backend
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+pydantic-settings
+python-dotenv
+pyyaml
+httpx
+ollama
+
+# documents, OCR, vision
+pymupdf
+pytesseract
+pillow
+
+# knowledge base
+chromadb
+
+# deliverables
+python-docx
+openpyxl
+python-pptx
+pandas
+
+# sandbox + network proof
+docker
+psutil
+
+# UI
+streamlit
+
+# dev
+pytest
+ruff

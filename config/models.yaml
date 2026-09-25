@@ -1,0 +1,71 @@
+# MODEL REGISTRY. Owner: Track A.
+# To upgrade hardware: change only `ollama_name` (and `backend` for vLLM). Nothing else.
+profile: cpu_16gb_demo
+
+models:
+  - id: general
+    ollama_name: qwen3.5:4b          # PPT/production: gpt-oss-120b (vLLM)
+    tasks: [document, general, vision]
+    supports_tools: true
+    supports_vision: true
+    think: false
+    num_ctx: 8192
+
+  - id: coder
+    ollama_name: qwen2.5-coder:3b    # PPT/production: Qwen3-Coder-Next (vLLM)
+    tasks: [coding]
+    supports_tools: false
+    supports_vision: false
+    think: false
+    num_ctx: 8192
+
+  - id: embed
+    ollama_name: bge-m3              # PPT/production: bge-m3 + bge-reranker-v2-m3
+    tasks: []
+    embedding: true
+
+# Which model handles which task type. Router output model_id comes from here.
+task_to_model:
+  document: general
+  general: general
+  vision: general
+  coding: coder
+
+# Layer 1: hard rules (checked in this order, first match wins)
+rules:
+  - if_image_attached: true
+    task_type: vision
+    reason: "Image attached -> vision-capable model"
+  - if_pdf_without_text_layer: true
+    task_type: document
+    reason: "Scanned PDF -> OCR + document agent"
+  - if_keywords_any: ["code", "python", "script", "function", "bug", "unit test", "program"]
+    task_type: coding
+    reason: "Coding keywords -> code specialist model"
+  - if_keywords_any: ["approval note", "summarize", "summary", "report", "sop", "manual", "letter"]
+    task_type: document
+    reason: "Document keywords -> document agent"
+
+# Layer 2: similarity examples (embedded once at startup with `embed`, cosine similarity)
+similarity_threshold: 0.55
+examples:
+  coding:
+    - "Write a function to calculate pipe wall thickness"
+    - "Fix the error in this Python code"
+    - "Create a script that reads a CSV and plots a chart"
+    - "Add unit tests for this calculation"
+  document:
+    - "Summarize this inspection report"
+    - "Draft an approval note for the repair"
+    - "What does our SOP say about hot work permits"
+    - "Extract the key findings from this letter"
+  vision:
+    - "What equipment is shown in this drawing"
+    - "Read the handwritten notes in this photo"
+    - "List all tags in this P&ID"
+  general:
+    - "Explain what a pressure relief valve does"
+    - "Give me a checklist for a shutdown meeting"
+
+# Layer 3
+default_task_type: general
