@@ -22,7 +22,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from backend import echo_agent
+from backend import agent
 from backend.file_store import file_store
 from backend.registry import registry
 from backend.llm_client import LLMError
@@ -92,7 +92,7 @@ logger = _setup_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task_store.start(echo_agent.run)
+    task_store.start(agent.run)
     logger.info("Task worker started")
     yield
     task_store.stop()

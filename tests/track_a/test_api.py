@@ -33,12 +33,38 @@ from shared.contracts import (
 )
 
 
+_STEP_DELAY_S = 0.5
+
+
+def scripted_agent(handle) -> None:
+    """Stand-in for backend.agent.run: 5 fixed events, no model calls (the real agent is tested in test_agent.py)."""
+    from backend.router import route
+    from shared.contracts import PlanStep, RouteRequest
+
+    decision = route(RouteRequest(message=handle.message, file_ids=handle.file_ids))
+    handle.set_route(decision)
+    handle.emit(EventType.ROUTE, "Routed", {"decision": decision.model_dump(mode="json")})
+    plan = [PlanStep(index=1, title="Echo the request back")]
+    handle.set_plan(plan)
+    handle.emit(EventType.PLAN, "Planned 1 step", {"steps": [s.model_dump(mode="json") for s in plan]})
+    time.sleep(_STEP_DELAY_S)
+    handle.emit(EventType.STEP_START, plan[0].title, {"index": 1, "title": plan[0].title}, step=1)
+    time.sleep(_STEP_DELAY_S)
+    handle.emit(EventType.LOG, "Echoing", {"level": "info", "text": handle.message})
+    answer = f"Echo: {handle.message}"
+    handle.set_final_answer(answer)
+    handle.emit(EventType.FINAL, "Done", {"answer": answer})
+
+
 @pytest.fixture(scope="module")
 def client():
+    from backend import agent
     from backend.main import app
 
-    with TestClient(app) as c:
-        yield c
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(agent, "run", scripted_agent)
+        with TestClient(app) as c:
+            yield c
 
 
 def _wait_for_task_done(client: TestClient, task_id: str, timeout_s: float = 15.0) -> list:

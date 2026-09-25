@@ -226,6 +226,15 @@ def _guard(fn):
     return wrapper
 
 
+@_guard
+def save_text_artifact(filename: str, text: str, kind: ArtifactKind, *, task_id: str = "",
+                       preview: str = "") -> Artifact:
+    """Save a plain-text deliverable (e.g. generated solution.py) and register it like the Office files."""
+    path = _artifact_file(filename)
+    path.write_text(_ILLEGAL_XML_RE.sub("", text), encoding="utf-8")
+    return register_artifact(path, kind, task_id=task_id, preview=preview or text)
+
+
 # ------------------------------------------------------------------ Word helpers
 def _template_path() -> Path:
     root = settings.WB_TEMPLATES_DIR
@@ -309,6 +318,14 @@ def split_sop_reference(reference: str) -> tuple[str, str]:
     return text, "-"
 
 
+def _normalize_number(number: str) -> str:
+    """'4,50,000' / '450,000' / '4,50,000.00' -> '450000'. Words like lakh/crore are NOT converted."""
+    plain = number.replace(",", "")
+    if re.fullmatch(r"\d+\.0+", plain):
+        plain = plain.split(".", 1)[0]
+    return plain
+
+
 def cost_text(cost: Optional[str], source_text: Optional[str]) -> str:
     """
     Keep cost_implication only if every number in it appears in the source
@@ -318,10 +335,10 @@ def cost_text(cost: Optional[str], source_text: Optional[str]) -> str:
     text = clean_text(cost, MAX_PARAGRAPH_CHARS).strip()
     if not text:
         return COST_PLACEHOLDER
-    numbers = [n.replace(",", "") for n in _NUMBER_RE.findall(text)]
+    numbers = [_normalize_number(n) for n in _NUMBER_RE.findall(text)]
     if not numbers:
         return text
-    source_numbers = {n.replace(",", "") for n in _NUMBER_RE.findall(source_text or "")}
+    source_numbers = {_normalize_number(n) for n in _NUMBER_RE.findall(source_text or "")}
     if all(n in source_numbers for n in numbers):
         return text
     return COST_PLACEHOLDER

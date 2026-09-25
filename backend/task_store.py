@@ -82,11 +82,21 @@ class TaskHandle:
     for cancellation between its own steps.
     """
 
-    def __init__(self, store: "TaskStore", task_id: str, message: str, file_ids: list[str]) -> None:
+    def __init__(
+        self,
+        store: "TaskStore",
+        task_id: str,
+        message: str,
+        file_ids: list[str],
+        mode: TaskMode = TaskMode.AGENT,
+        scenario: Optional[Scenario] = None,
+    ) -> None:
         self._store = store
         self.task_id = task_id
         self.message = message
         self.file_ids = list(file_ids)
+        self.mode = mode
+        self.scenario = scenario
 
     def emit(
         self,
@@ -112,6 +122,10 @@ class TaskHandle:
 
     def add_artifact(self, artifact: Artifact) -> None:
         self._store._append_artifact(self.task_id, artifact)
+
+    def fail(self, code: str, message: str) -> None:
+        """Mark the task FAILED with this error once the agent function returns."""
+        self._store._update(self.task_id, error=ErrorInfo(code=code, message=message))
 
 
 class TaskStore:
@@ -263,8 +277,9 @@ class TaskStore:
             record.status = TaskStatus.RUNNING
             record.started_at = datetime.now(timezone.utc)
             message, file_ids = record.message, list(record.file_ids)
+            mode, scenario = record.mode, record.scenario
 
-        handle = TaskHandle(self, task_id, message, file_ids)
+        handle = TaskHandle(self, task_id, message, file_ids, mode=mode, scenario=scenario)
         try:
             if self._agent_fn is None:
                 raise RuntimeError("TaskStore.start() was never called")
@@ -273,8 +288,10 @@ class TaskStore:
             with self._lock:
                 record = self._tasks.get(task_id)
                 if record is not None:
+                    error = ErrorInfo(code="INTERNAL", message=f"Unexpected error: {exc!r}")
+                    self._append_event_locked(record, EventType.ERROR, "Task failed", {"error": error.model_dump()})
                     record.status = TaskStatus.FAILED
-                    record.error = ErrorInfo(code="INTERNAL", message=str(exc))
+                    record.error = error
                     record.finished_at = datetime.now(timezone.utc)
             return
 
@@ -285,6 +302,8 @@ class TaskStore:
             if record.cancel_requested:
                 record.status = TaskStatus.CANCELLED
                 record.error = ErrorInfo(code="CANCELLED", message="Task cancelled by user.")
+            elif record.error is not None:
+                record.status = TaskStatus.FAILED
             else:
                 record.status = TaskStatus.SUCCEEDED
             record.finished_at = datetime.now(timezone.utc)
