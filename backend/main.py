@@ -19,14 +19,14 @@ from typing import Optional
 import httpx
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend import echo_agent
 from backend.file_store import file_store
 from backend.registry import registry
 from backend.llm_client import LLMError
-from backend.tools import knowledge
+from backend.tools import knowledge, office
 from backend.tools.files import FileSafetyError
 from backend.tools.sandbox import sandbox_available
 from backend.router import route as run_router
@@ -265,8 +265,15 @@ async def post_task_cancel(task_id: str) -> TaskState:
 # ---------------------------------------------------------------- stubs (finished by later tickets)
 @app.get(f"{API_PREFIX}/artifacts/{{artifact_id}}")
 async def get_artifact(artifact_id: str):
-    # TODO(A7): real artifact storage. Every id is unknown until that ticket lands.
-    raise not_found("FILE_NOT_FOUND", "Artifact storage is not implemented yet (ticket A7).")
+    if ".." in artifact_id or "/" in artifact_id or "\\" in artifact_id:
+        raise HTTPException(
+            status_code=400, detail={"code": "BAD_REQUEST", "message": "artifact_id must not contain path characters"}
+        )
+    found = office.artifact_path(artifact_id)
+    if found is None:
+        raise not_found("FILE_NOT_FOUND", f"no artifact with id {artifact_id!r}")
+    path, artifact = found
+    return FileResponse(path, media_type=office.media_type(artifact.kind), filename=artifact.filename)
 
 
 @app.get(f"{API_PREFIX}/network/status", response_model=NetworkStatus)
