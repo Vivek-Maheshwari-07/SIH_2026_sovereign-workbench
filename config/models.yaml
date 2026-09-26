@@ -54,6 +54,10 @@ examples:
     - "Fix the error in this Python code"
     - "Create a script that reads a CSV and plots a chart"
     - "Add unit tests for this calculation"
+    - "Calculate the pipe wall thickness from pressure, diameter and allowable stress."
+    - "Compute the required flange thickness for these design values."
+    - "Find the pressure drop in this pipe using these inputs."
+    - "Do an engineering calculation and show the steps."
   document:
     - "Summarize this inspection report"
     - "Draft an approval note for the repair"
@@ -66,6 +70,10 @@ examples:
   general:
     - "Explain what a pressure relief valve does"
     - "Give me a checklist for a shutdown meeting"
+    - "What is the difference between a gate valve and a globe valve?"
+    - "Give me some background on refinery distillation."
+    - "Explain this concept in simple words."
+    - "What are the safety precautions for working at height?"
 
 # Layer 3
 default_task_type: general
