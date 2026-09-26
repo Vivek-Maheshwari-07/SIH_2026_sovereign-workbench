@@ -188,11 +188,38 @@ def check_env_keys() -> None:
         check(True, f"Env keys: all {len(example_keys)} keys from .env.example set in .env")
 
 
+def user_env_value(name: str) -> str | None:
+    """A variable from the Windows USER environment (what `setx` writes), else the process environment."""
+    if sys.platform == "win32":
+        import winreg
+
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+                return str(winreg.QueryValueEx(key, name)[0])
+        except OSError:
+            return None
+    import os
+
+    return os.environ.get(name)
+
+
+def check_ollama_no_cloud() -> None:
+    """Ollama's cloud features (remote models, web search) must be off for the sovereign demo."""
+    value = user_env_value("OLLAMA_NO_CLOUD")
+    if value is not None and value.strip() == "1":
+        check(True, "OLLAMA_NO_CLOUD is set to 1 (user environment)")
+    else:
+        now = "not set" if value is None else f"is {value!r}"
+        check(False, f"OLLAMA_NO_CLOUD {now} (user environment). Fix: setx OLLAMA_NO_CLOUD 1, then restart Ollama "
+                     "(scripts/start_demo.ps1 does this)")
+
+
 def main() -> int:
     check_python_version()
     check_installed_packages()
     ollama_up = check_ollama_reachable()
     check_ollama_models(ollama_up)
+    check_ollama_no_cloud()
     check_tesseract()
     docker_up = check_docker_running()
     check_docker_image(docker_up)

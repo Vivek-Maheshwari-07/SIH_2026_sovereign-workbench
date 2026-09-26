@@ -136,9 +136,14 @@ with unit tests, and run it for P = 10 MPa, D = 200 mm, S = 138 MPa."*
 | PSV-201 | Pressure safety valve (on V-201, to flare) | top-right |
 | LT-202 | Level transmitter (on V-201) | right, near midline |
 
-**Pass: at least 10 of 12 tags** read correctly, **and** no invented tags, **and** equipment
-type correct for every tag that is found. Duplicates of the same tag from overlapping tiles
+**Pass: all 12 of 12 tags** read correctly, **and** no invented tags, **and** equipment
+type correct for every tag. Duplicates of the same tag from overlapping tiles
 must be merged (the .xlsx lists each tag once).
+
+Why 12 of 12 (changed from "at least 10 of 12" on 2026-09-26, approved by both tracks): since the
+P&ID fast path (ticket A10: OCR on the whole drawing, vision to confirm), every measured run on this
+drawing finds 12/12 with nothing else (see `docs/perf.md`). A missing tag is therefore a regression
+to investigate, not normal model variation, so the soak test (`scripts/e2e_run.py`) fails on it.
 
 **Not tags (must not appear as tags):** `DEMO-C-001` (drawing number), `CW`, `UNIT 300`.
 

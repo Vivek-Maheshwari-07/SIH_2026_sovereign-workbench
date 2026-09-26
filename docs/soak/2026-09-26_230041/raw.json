@@ -1,0 +1,56 @@
+{
+  "started": "2026-09-26T23:00:41.776589",
+  "backend": "http://127.0.0.1:8000",
+  "contract": "1.0.2",
+  "mode": "guided",
+  "runs": 1,
+  "scenarios": [
+    "code_calc"
+  ],
+  "interrupted": false,
+  "all_passed": true,
+  "net001_before": 0,
+  "net001_after": 0,
+  "results": [
+    {
+      "run": 1,
+      "scenario": "code_calc",
+      "work_order": "WO-B",
+      "task_id": "t_b0dbc4a0b72b",
+      "status": "succeeded",
+      "seconds": 81.7,
+      "artifacts": [
+        {
+          "artifact_id": "a_dcb86adc5d1a",
+          "filename": "solution_f3ba91.py",
+          "kind": "py",
+          "size_bytes": 459,
+          "downloaded": 459,
+          "saved": "artifacts\\run01_code_calc__solution_f3ba91.py"
+        },
+        {
+          "artifact_id": "a_6431194e6b81",
+          "filename": "test_solution_f3ba91.py",
+          "kind": "py",
+          "size_bytes": 656,
+          "downloaded": 656,
+          "saved": "artifacts\\run01_code_calc__test_solution_f3ba91.py"
+        }
+      ],
+      "checks": [
+        {
+          "name": "artifacts",
+          "ok": true,
+          "detail": "2/2 downloaded, all non-empty"
+        },
+        {
+          "name": "B: result 7.246 mm",
+          "ok": true,
+          "detail": "'7.246' in the answer"
+        }
+      ],
+      "error": null,
+      "passed": true
+    }
+  ]
+}
