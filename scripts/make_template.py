@@ -166,6 +166,9 @@ def build(path: Path) -> Path:
     for col, width in zip(sops.columns, (Cm(1.2), Cm(13.0), Cm(2.8))):
         for cell in col.cells:
             cell.width = width
+    sop_note = doc.add_paragraph().add_run("{{sop_note}}")   # removed by office.py unless refs were auto-added
+    sop_note.italic = True
+    sop_note.font.size = Pt(9)
 
     _heading(doc, "Recommendation")
     doc.add_paragraph("{{recommendation}}")

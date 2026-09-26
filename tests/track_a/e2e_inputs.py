@@ -60,9 +60,9 @@ SOPS: dict[str, list[str]] = {
 # 10 tags placed well inside the four quadrants so each is inside one tile.
 PID_TAGS: list[tuple[str, str, tuple[int, int]]] = [
     ("P-101A", "pump", (180, 170)), ("P-101B", "pump", (520, 170)), ("FIC-101", "instrument", (300, 420)),
-    ("V-201", "valve", (1020, 170)), ("PT-102", "instrument", (1350, 400)),
+    ("XV-201", "valve", (1020, 170)), ("PT-102", "instrument", (1350, 400)),
     ("T-301", "vessel", (200, 800)), ("LT-301", "instrument", (520, 1000)),
-    ("E-401", "exchanger", (1050, 800)), ("TT-401", "instrument", (1350, 1000)), ("V-202", "valve", (1180, 620)),
+    ("E-401", "exchanger", (1050, 800)), ("TT-401", "instrument", (1350, 1000)), ("XV-202", "valve", (1180, 620)),
 ]
 EXPECTED_TAGS = [tag for tag, _, _ in PID_TAGS]
 

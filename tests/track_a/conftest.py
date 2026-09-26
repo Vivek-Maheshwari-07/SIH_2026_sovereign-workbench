@@ -6,8 +6,23 @@ import socket
 import pytest
 
 
+def pytest_addoption(parser):
+    parser.addoption("--runslow", action="store_true", default=False,
+                     help="also run tests marked slow (live Ollama / end-to-end)")
+
+
 def pytest_configure(config):
-    config.addinivalue_line("markers", "slow: marks tests as slow (e.g. a real Ollama vision call)")
+    config.addinivalue_line("markers", "slow: live Ollama / end-to-end test; skipped unless --runslow or -m slow")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Plain runs skip slow tests; `--runslow` or a -m expression naming "slow" runs them."""
+    if config.getoption("--runslow", default=False) or "slow" in (config.getoption("markexpr", default="") or ""):
+        return
+    skip = pytest.mark.skip(reason="slow/live test: run with --runslow or -m slow")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip)
 
 
 # ---------------------------------------------------------------- network guard

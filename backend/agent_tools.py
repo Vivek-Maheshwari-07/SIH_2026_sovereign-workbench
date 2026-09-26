@@ -11,6 +11,7 @@ emits an artifact event (keys as in shared.contracts).
 """
 from __future__ import annotations
 
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -45,6 +46,34 @@ MAX_TOP_K = 10
 MAX_FILLED_SOP_REFS = 3             # retrieved passages cited when the model cites none
 # Seen live: after the Excel file was saved the 4B model wandered off into run_code_task and timed out.
 NEXT_FINISH = "The file is ready. Next step: call finish with a short answer naming the file."
+
+# Tag letter prefix -> (equipment type to use, words that count as agreeing with it).
+# Common ISA / plant conventions; extend here. Unknown prefixes keep the model's answer.
+_INSTRUMENT = ("instrument",)
+TAG_TYPE_RULES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "P": ("Pump", ("pump",)),
+    "V": ("Vessel", ("vessel", "drum", "separator", "receiver")),
+    "T": ("Tank", ("tank",)),
+    "E": ("Heat exchanger", ("exchanger", "cooler", "heater", "condenser", "reboiler")),
+    "C": ("Column", ("column", "tower")),
+    "K": ("Compressor", ("compressor",)),
+    "FT": ("Flow transmitter", ("flow", "transmitter") + _INSTRUMENT),
+    "FIC": ("Flow indicating controller", ("flow", "controller") + _INSTRUMENT),
+    "FV": ("Flow control valve", ("flow", "valve")),
+    "PT": ("Pressure transmitter", ("pressure", "transmitter") + _INSTRUMENT),
+    "PI": ("Pressure indicator", ("pressure", "indicator", "gauge") + _INSTRUMENT),
+    "PIC": ("Pressure indicating controller", ("pressure", "controller") + _INSTRUMENT),
+    "PV": ("Pressure control valve", ("pressure", "valve")),
+    "LT": ("Level transmitter", ("level", "transmitter") + _INSTRUMENT),
+    "LI": ("Level indicator", ("level", "indicator", "gauge") + _INSTRUMENT),
+    "LIC": ("Level indicating controller", ("level", "controller") + _INSTRUMENT),
+    "TT": ("Temperature transmitter", ("temperature", "transmitter") + _INSTRUMENT),
+    "TI": ("Temperature indicator", ("temperature", "indicator", "gauge") + _INSTRUMENT),
+    "TIC": ("Temperature indicating controller", ("temperature", "controller") + _INSTRUMENT),
+    "PSV": ("Pressure safety valve", ("safety", "relief", "psv")),
+    "PRV": ("Pressure relief valve", ("relief", "safety", "prv")),
+}
+_TAG_PREFIX_RE = re.compile(r"\s*([A-Za-z]+)")
 
 EmitFn = Callable[..., None]
 
@@ -246,15 +275,17 @@ def draft_approval_note(ctx: ToolContext, doc_id: str, kb_ref_ids: Optional[list
     ]
     note: ApprovalNote = _llm_json(ctx, ApprovalNote, messages, "draft_approval_note")
     note.sop_references = _check_sop_references(ctx, note, hits)
+    sop_auto = False
     if hits and not note.sop_references:
         # Small models often leave the list empty; cite the passages that were chosen as relevant.
         chosen = sorted(hits, key=lambda h: h.score, reverse=True)[:MAX_FILLED_SOP_REFS]
         note.sop_references = list(dict.fromkeys(f"{h.source}, p.{h.page}" if h.page else h.source for h in chosen))
+        sop_auto = True
         ctx.event(EventType.LOG, "SOP references filled", {"level": "info", "text": (
             "The model cited no SOP; cited the retrieved passages instead: " + "; ".join(note.sop_references))})
     _check_source_pages(ctx, note, doc)
 
-    artifact = office.make_word(note, source_text=doc.full_text(), task_id=ctx.task_id)
+    artifact = office.make_word(note, source_text=doc.full_text(), task_id=ctx.task_id, sop_auto=sop_auto)
     ctx.artifact(artifact)
     note_id = ctx.scratchpad.new_id("note")
     ctx.scratchpad.notes[note_id] = note
@@ -273,6 +304,26 @@ Instrument, Heat exchanger, Line or Other), a short description if the text give
 List a tag once per tile where it appears. Do not invent tags that are not in the text."""
 
 
+def tag_prefix(tag: str) -> str:
+    """Letter prefix of a tag: 'FIC-101' -> 'FIC', 'p-101a' -> 'P'."""
+    match = _TAG_PREFIX_RE.match(tag or "")
+    return match.group(1).upper() if match else ""
+
+
+def check_tag_types(ctx: ToolContext, tag_list: PidTagList) -> None:
+    """Correct equipment types that clearly contradict the tag's letter prefix (TAG_TYPE_RULES)."""
+    for tag in tag_list.tags:
+        rule = TAG_TYPE_RULES.get(tag_prefix(tag.tag))
+        if rule is None:
+            continue                                     # unknown prefix: keep the model's answer
+        canonical, accepted = rule
+        given = (tag.equipment_type or "").lower()
+        if not any(word in given for word in accepted):
+            ctx.warn(f"Tag {tag.tag!r}: model said {tag.equipment_type!r}, but prefix {tag_prefix(tag.tag)} "
+                     f"means {canonical}; using {canonical}.")
+            tag.equipment_type = canonical
+
+
 def extract_pid_tags(ctx: ToolContext, doc_id: str) -> ToolOutcome:
     doc = _doc(ctx, doc_id)
     blocks = []
@@ -288,6 +339,7 @@ def extract_pid_tags(ctx: ToolContext, doc_id: str) -> ToolOutcome:
         if tag.tile is not None and not 1 <= tag.tile <= tile_count:
             ctx.warn(f"Tag {tag.tag!r}: tile {tag.tile} does not exist; tile cleared.")
             tag.tile = None
+    check_tag_types(ctx, tag_list)
 
     artifact = office.make_excel(tag_list, task_id=ctx.task_id)
     ctx.artifact(artifact)
