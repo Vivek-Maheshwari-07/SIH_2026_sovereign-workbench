@@ -1,0 +1,34 @@
+--- Page 1 ---
+CRUDE LINE 6-P-101 THICKNESS SURVEY
+Report No.: SDR/INSP/2026/0419
+Date of survey: 18-09-2026
+Inspector: R. T. Menon, Level II UT
+Unit: Crude Distillation Unit, Unit 12 - line 6-P-101 (6 inch, sour crude)
+
+1. Background
+Line 6-P-101 carries sour crude from charge pump P-101A/B to the preheat train. It is a 6 inch carbon steel line, schedule 40, nominal wall 7.11 mm, required minimum thickness 4.80 mm. The line was surveyed at six condition monitoring locations (CML) while in service. The last survey was in September 2021.
+
+2. Wall thickness readings (UT)
+CML | Location | Measured (mm) | Loss (%)
+CML-01 | Straight run after P-101B | 6.95 | 2
+CML-02 | Straight run, pipe rack | 6.88 | 3
+CML-03 | Elbow at P-101A discharge | 5.20 | 27
+CML-04 | Dead leg low point | 5.90 | 17
+CML-05 | Under insulation at support PS-12 | 6.10 | 14
+CML-06 | Before preheat exchanger | 7.02 | 1
+Corrosion rate at CML-03: 0.38 mm/year over 5 years. Remaining life at CML-03: about 1 year to the required minimum thickness of 4.80 mm.
+
+3. Findings
+No. | Item | Observation | Severity
+1 | CML-03 elbow at P-101A discharge | Erosion-corrosion. 5.20 mm against 7.11 mm nominal (27% loss). About 1 year of remaining life. | High
+2 | Flange FL-3 near CML-04 | Weep at gasket. Personal H2S monitor alarmed at 12 ppm within 1 m of the flange. Area barricaded. | High
+3 | CML-04 dead leg low point | 5.90 mm (17% loss). Water hold-up suspected. | Medium
+4 | CML-05 at support PS-12 | Corrosion under insulation. 6.10 mm (14% loss). | Medium
+5 | Insulation cladding | About 2 m of damaged cladding near PS-12. | Low
+
+--- Page 2 ---
+4. Recommendation
+(a) Replace a 3 m spool including the CML-03 elbow at the next shutdown. Before cutting, isolate the line, lock and tag the P-101A motor and valves, drain and purge. Cutting and welding only under a hot work permit with gas test and fire watch. (b) Replace the FL-3 gasket. Work on FL-3 needs H2S monitoring and breathing apparatus. (c) Re-survey CML-04 and CML-05 in 6 months and repair the insulation cladding.
+Estimated cost: Rs 2,85,000 (spool replacement Rs 1,95,000; insulation and CUI repair Rs 55,000; gasket and scaffolding Rs 35,000).
+
+Signed: R. T. Menon (Inspector, Level II UT)    Reviewed: K. S. Iyer (Section Head, Inspection)
