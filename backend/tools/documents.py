@@ -4,9 +4,15 @@ Document extraction for Track A. Per page, in order:
   2. No text layer                                             -> render at WB_OCR_DPI, deskew
                                                                    (see _deskew), run Tesseract.
   3. OCR came out poor (see _is_ocr_poor)                      -> send the page image to the vision model.
-  4. kind="pid"                                                -> skip 1-3 entirely; cut the image
-                                                                   into 4 overlapping tiles and send
-                                                                   each to the vision model.
+  4. kind="pid"                                                -> skip 1-3 entirely. Fast path (A10):
+                                                                   deskew, cut into 4 overlapping tiles,
+                                                                   Tesseract each tile with a tag
+                                                                   whitelist, keep regex tag candidates,
+                                                                   then ONE vision call on the whole
+                                                                   drawing to confirm / add tags.
+                                                                   If OCR finds fewer than
+                                                                   PID_FAST_MIN_TAGS tags: old path,
+                                                                   each tile to the vision model.
 A standalone image (png/jpg) is treated like a single page with no text
 layer, so it goes straight into step 2.
 
@@ -31,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal, Optional, Union
@@ -87,9 +94,25 @@ DESKEW_MIN_ANGLE = 0.1        # smaller detected angles are left alone
 DESKEW_DETECT_MAX_PX = 1200   # longest side of the copy the angle is detected on
 DESKEW_INK_THRESHOLD = 128    # grey level below which a pixel counts as ink
 
+# P&ID fast path (A10). Tesseract in sparse-text mode (psm 11: labels scattered
+# over a drawing, no page layout) with only the characters a tag can contain.
+# On the demo drawing this reads 12/12 tags in ~1.5 s, where the 4 vision
+# tiles took ~230 s cold. A tag is 1-4 letters, a dash, 2-4 digits and an
+# optional letter suffix (P-201A, PSV-201, FT-201); the look-arounds reject
+# pieces of longer codes such as the drawing number DEMO-C-001 ("C-001").
+PID_TAG_RE = re.compile(r"(?<![A-Z0-9-])([A-Z]{1,4}-\d{2,4}[A-Z]?)(?![A-Z0-9-])")
+PID_OCR_WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+PID_OCR_CONFIG = f"--psm 11 -c tessedit_char_whitelist={PID_OCR_WHITELIST}"
+PID_FAST_MIN_TAGS = 3              # fewer unique OCR tags than this -> old 4-tile vision path
+PID_WHOLE_DRAWING = "whole drawing"  # PageResult.tile of the single vision confirm call
+# Tags used as examples in the vision prompts. A tag the vision model returns that
+# equals one of these, and that OCR did not find, is treated as an echo of the prompt.
+PID_PROMPT_EXAMPLES = ("P-101", "V-201", "FT-301")
+
 # Bump if the cached JSON shape or the extraction pipeline changes in a way
 # that makes old cached results wrong. 2 = deskew before OCR (A8c).
-_CACHE_VERSION = 2
+# 3 = P&ID OCR fast path + one vision confirm call (A10).
+_CACHE_VERSION = 3
 
 
 class DocumentExtractionError(Exception):
@@ -102,7 +125,9 @@ class DocumentExtractionError(Exception):
         self.code = code
 
 
-ExtractMethod = Literal["text_layer", "ocr", "vision", "vision_tiles", "text_file", "docx", "xlsx"]
+ExtractMethod = Literal["text_layer", "ocr", "vision", "vision_tiles", "ocr_tiles", "vision_confirm",
+                        "text_file", "docx", "xlsx"]
+PID_FAST_METHODS = frozenset({"ocr_tiles", "vision_confirm"})
 
 # Extensions read directly as plain text (no OCR/vision needed).
 _TEXT_FILE_SUFFIXES = {".txt", ".md", ".py", ".csv"}
@@ -117,6 +142,7 @@ class PageResult:
     tile: Optional[str] = None  # set only for kind="pid" results
     deskew_angle: Optional[float] = None  # detected skew in degrees (CCW +); set when the page went through OCR
     error: Optional[str] = None  # set if this page/tile failed; text is best-effort
+    note: Optional[str] = None  # kind="pid": which path was used and why (shown to the user as a log event)
 
 
 @dataclass
@@ -318,8 +344,12 @@ def _make_pid_tiles(image: Image.Image) -> list[tuple[str, Image.Image]]:
 _PID_TILE_PROMPT = (
     "This is one tile of a larger P&ID (piping and instrumentation diagram). "
     "List every equipment or instrument tag you can read in this tile (for "
-    "example P-101, V-201, FT-301), one per line. If you can't read any tags "
+    f"example {', '.join(PID_PROMPT_EXAMPLES)}), one per line. If you can't read any tags "
     "in this tile, say so plainly."
+)
+_PID_CONFIRM_PROMPT = (
+    "This is a P&ID (piping and instrumentation diagram). List every equipment or instrument tag "
+    f"you can read (for example {', '.join(PID_PROMPT_EXAMPLES)}), one per line. Only tags, no other text."
 )
 
 
@@ -339,6 +369,82 @@ def _vision_extract_pid_tiles(image: Image.Image, *, purpose: str) -> list[PageR
         except LLMError as exc:  # a broken tile must not stop the others
             results.append(PageResult(page=1, text="", method="vision_tiles", tile=tile_name, error=str(exc)))
     return results
+
+
+def find_tag_candidates(text: str) -> list[str]:
+    """Unique tag-shaped strings in `text`, upper-cased, in order of first appearance."""
+    return list(dict.fromkeys(PID_TAG_RE.findall((text or "").upper())))
+
+
+def _ocr_pid_tile(tile_image: Image.Image) -> str:
+    return pytesseract.image_to_string(tile_image, config=PID_OCR_CONFIG)
+
+
+def _ocr_pid_tiles(image: Image.Image) -> list[PageResult]:
+    """Deskew the drawing once, then OCR each tile; each page's text is its tag candidates, one per line."""
+    _configure_tesseract()
+    angle: Optional[float] = None
+    if DESKEW_ENABLED:
+        image, angle = _deskew(image)
+    results: list[PageResult] = []
+    for tile_name, tile_image in _make_pid_tiles(image):
+        try:
+            tags = find_tag_candidates(_ocr_pid_tile(tile_image))
+            results.append(PageResult(page=1, text="\n".join(tags), method="ocr_tiles", tile=tile_name,
+                                      deskew_angle=angle))
+        except Exception as exc:  # a broken tile must not stop the others
+            results.append(PageResult(page=1, text="", method="ocr_tiles", tile=tile_name, deskew_angle=angle,
+                                      error=str(exc)))
+    return results
+
+
+def ocr_tag_count(pages: list[PageResult]) -> int:
+    return len({tag for page in pages for tag in page.text.split()})
+
+
+def use_pid_fast_path(ocr_pages: list[PageResult]) -> bool:
+    """Fast path only when OCR found enough tags; otherwise the drawing is too hard for OCR."""
+    return ocr_tag_count(ocr_pages) >= PID_FAST_MIN_TAGS
+
+
+def _vision_confirm_pid(image: Image.Image) -> PageResult:
+    """ONE vision call on the whole drawing (resized to WB_VISION_MAX_PX); text = its tag candidates."""
+    png_bytes = _image_to_png_bytes(_resize_for_vision(image))
+    try:
+        reply = chat(_vision_model_name(), [{"role": "user", "content": _PID_CONFIRM_PROMPT}],
+                     images=[png_bytes], purpose="document_extract_pid_confirm")
+    except LLMError as exc:  # OCR tags are still good without the confirm step
+        return PageResult(page=1, text="", method="vision_confirm", tile=PID_WHOLE_DRAWING, error=str(exc))
+    tags = find_tag_candidates(reply.text)
+    return PageResult(page=1, text="\n".join(tags), method="vision_confirm", tile=PID_WHOLE_DRAWING)
+
+
+def _extract_pid(image: Image.Image) -> list[PageResult]:
+    ocr_pages = _ocr_pid_tiles(image)
+    found = ocr_tag_count(ocr_pages)
+    if not use_pid_fast_path(ocr_pages):
+        pages = _vision_extract_pid_tiles(image, purpose="document_extract_pid")
+        pages[0].note = (f"P&ID read by the 4-tile vision path: OCR found only {found} tag(s), "
+                         f"fewer than {PID_FAST_MIN_TAGS}.")
+        return pages
+    confirm = _vision_confirm_pid(image)
+    ocr_pages[0].note = (f"P&ID read by the fast path: OCR on {len(ocr_pages)} tiles found {found} tags; "
+                         f"one vision check on the whole drawing.")
+    return ocr_pages + [confirm]
+
+
+def pid_path_note(pages: list[PageResult]) -> Optional[str]:
+    """Human-readable summary of how a P&ID was read (None if these pages are not a P&ID read)."""
+    note = next((p.note for p in pages if p.note), None)
+    confirm = next((p for p in pages if p.method == "vision_confirm"), None)
+    if note is None or confirm is None:
+        return note
+    if confirm.error:
+        return f"{note} Vision check failed ({confirm.error}); OCR tags kept."
+    ocr_tags = {t for p in pages if p.method == "ocr_tiles" for t in p.text.split()}
+    seen = confirm.text.split()
+    confirmed = sum(t in ocr_tags for t in seen)
+    return f"{note} It read {len(seen)} tags: {confirmed} confirm OCR, {len(seen) - confirmed} not found by OCR."
 
 
 # ---------------------------------------------------------------- caching
@@ -488,8 +594,8 @@ def extract(source: Union[str, Path], kind: str = "auto") -> ExtractResult:
     """
     Extracts per-page text from a file (a file_id already known to
     backend.file_store, or a plain path). `kind` is "auto" (default: text
-    layer / OCR / vision, in that order) or "pid" (skip straight to tiled
-    vision extraction for a P&ID drawing).
+    layer / OCR / vision, in that order) or "pid" (P&ID drawing: OCR fast path
+    with one vision confirm call, or the 4-tile vision path; see _extract_pid).
     """
     path = _resolve_source(source)
     if not path.exists():
@@ -504,8 +610,7 @@ def extract(source: Union[str, Path], kind: str = "auto") -> ExtractResult:
     suffix = path.suffix.lower()
 
     if kind == "pid":
-        image = _load_first_page_as_image(path, suffix)
-        pages = _vision_extract_pid_tiles(image, purpose="document_extract_pid")
+        pages = _extract_pid(_load_first_page_as_image(path, suffix))
     elif suffix == ".pdf":
         pages = _extract_pdf_pages(path)
     elif suffix in (".png", ".jpg", ".jpeg"):

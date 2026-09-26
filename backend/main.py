@@ -9,9 +9,11 @@ assets from a CDN, which would break the "no external calls" proof
 """
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -23,8 +25,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from backend import agent
-from backend.audit import read_audit_records
+from backend import agent, prewarm
+from backend.audit import read_audit_records, write_audit_record
 from backend.net_probe import run_probe
 from backend.file_store import file_store
 from backend.registry import registry
@@ -325,9 +327,15 @@ def post_kb_search(payload: KBSearchRequest) -> KBSearchResponse:
 
 
 @app.post(f"{API_PREFIX}/admin/prewarm", response_model=PrewarmResult)
-async def post_admin_prewarm() -> PrewarmResult:
-    # TODO(A10): real prewarm (load every model into RAM via a tiny call each).
-    return PrewarmResult(warmed=[], failed=[], duration_ms=0)
+def post_admin_prewarm(response: Response) -> PrewarmResult:
+    """Loads the models and warms our caches (backend/prewarm.py). Never fails: bad items land in `failed`.
+    Per-item times are in the warmed/failed labels; the X-Prewarm-* headers repeat them as JSON."""
+    result, items, loaded = prewarm.run_prewarm()
+    response.headers["X-Prewarm-Items"] = json.dumps([asdict(i) for i in items], ensure_ascii=True)
+    response.headers["X-Prewarm-Loaded-Models"] = ",".join(loaded)
+    write_audit_record(kind="system", name="prewarm", duration_ms=result.duration_ms, ok=not result.failed,
+                       detail={"items": [asdict(i) for i in items], "loaded_models": loaded})
+    return result
 
 
 # ---------------------------------------------------------------- audit

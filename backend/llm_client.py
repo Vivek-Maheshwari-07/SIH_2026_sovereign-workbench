@@ -28,6 +28,12 @@ _TOOL_CALL_TAG_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOT
 
 ImageInput = Union[str, bytes, Path]
 
+# How long Ollama keeps a model in RAM after its last call (Ollama's default is 5 min).
+# Longer than the gap between demo scenarios, so /api/admin/prewarm still counts
+# when the demo starts later and no scenario pays a reload (qwen3.5:4b: ~9 s).
+# No .env key exists for this, so it is a named constant.
+OLLAMA_KEEP_ALIVE = "30m"
+
 
 class LLMError(Exception):
     """Raised for any LLM-call failure. `code` is a key from shared.contracts.ERROR_CODES."""
@@ -183,6 +189,7 @@ def chat(
             tools=tools,
             think=settings.WB_THINK,
             options=_options(),
+            keep_alive=OLLAMA_KEEP_ALIVE,
         )
 
     response, duration_ms = _call_with_retry(_do_call, purpose=purpose, model_id=model_id)
@@ -252,6 +259,7 @@ def chat_json_meta(
             format=json_schema,
             think=settings.WB_THINK,
             options=_options(),
+            keep_alive=OLLAMA_KEEP_ALIVE,
         )
 
     last_error: Optional[Exception] = None
@@ -307,7 +315,7 @@ def embed(texts: list[str], *, purpose: str = "embed") -> list[list[float]]:
     client = _client()
 
     def _do_call():
-        return client.embed(model=model_name, input=texts)
+        return client.embed(model=model_name, input=texts, keep_alive=OLLAMA_KEEP_ALIVE)
 
     response, duration_ms = _call_with_retry(_do_call, purpose=purpose, model_id=model_name)
 
@@ -321,3 +329,27 @@ def embed(texts: list[str], *, purpose: str = "embed") -> list[list[float]]:
     )
 
     return [list(vector) for vector in response.embeddings]
+
+
+def load_model(model_name: str, *, embedding: bool = False) -> int:
+    """
+    Load `model_name` into Ollama's RAM without generating anything (prewarm).
+    Uses the same options as real calls: a different num_ctx would make Ollama
+    reload the model on the first real call. Returns the call time in ms.
+    """
+    client = _client()
+
+    def _do_call():
+        if embedding:
+            return client.embed(model=model_name, input=["warm up"], keep_alive=OLLAMA_KEEP_ALIVE)
+        return client.generate(model=model_name, prompt="", options=_options(), keep_alive=OLLAMA_KEEP_ALIVE)
+
+    _, duration_ms = _call_with_retry(_do_call, purpose="prewarm", model_id=model_name)
+    write_audit_record(kind="llm", name=model_name, target=settings.OLLAMA_HOST, duration_ms=duration_ms,
+                       ok=True, detail={"purpose": "prewarm"})
+    return duration_ms
+
+
+def loaded_models() -> list[str]:
+    """Ollama model names currently in RAM (`ollama ps`), most recently used first as Ollama lists them."""
+    return [m.model for m in _client().ps().models]

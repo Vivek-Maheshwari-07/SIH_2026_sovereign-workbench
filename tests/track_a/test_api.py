@@ -171,10 +171,15 @@ def test_network_probe_blocked_connection_is_unreachable(client: TestClient):
     assert "disabled in tests" in (result.error or "")
 
 
-def test_admin_prewarm_stub_returns_valid_shape(client: TestClient):
+def test_admin_prewarm_returns_valid_shape(client: TestClient, monkeypatch):
+    from backend import prewarm
+    monkeypatch.setattr(prewarm, "prewarm_steps", lambda: [("model x", lambda: "loaded")])
+    monkeypatch.setattr(prewarm, "_loaded", lambda: ["x"])
     resp = client.post(f"{API_PREFIX}/admin/prewarm")
     assert resp.status_code == 200
-    PrewarmResult.model_validate(resp.json())
+    result = PrewarmResult.model_validate(resp.json())
+    assert result.warmed[0].startswith("model x (") and result.failed == []
+    assert resp.headers["X-Prewarm-Loaded-Models"] == "x"
 
 
 def test_artifact_unknown_id_returns_404(client: TestClient):

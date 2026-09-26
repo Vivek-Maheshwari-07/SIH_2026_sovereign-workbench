@@ -24,7 +24,14 @@ from backend.file_store import file_store
 from backend.flows import code_flow
 from backend.registry import registry
 from backend.tools import knowledge, office
-from backend.tools.documents import PageResult, extract
+from backend.tools.documents import (
+    PID_FAST_METHODS,
+    PID_PROMPT_EXAMPLES,
+    PID_TILE_NAMES,
+    PageResult,
+    extract,
+    pid_path_note,
+)
 from shared.contracts import (
     ApprovalNote,
     Artifact,
@@ -33,6 +40,7 @@ from shared.contracts import (
     ErrorInfo,
     EventType,
     KBHit,
+    PidTag,
     PidTagList,
     Severity,
     TaskType,
@@ -190,6 +198,9 @@ def read_document(ctx: ToolContext, file_id: str, kind: str = "auto") -> ToolOut
     doc_id = ctx.scratchpad.new_id("doc")
     entry = DocEntry(doc_id=doc_id, file_id=file_id, filename=ref.filename, kind=kind, pages=pages)
     ctx.scratchpad.docs[doc_id] = entry
+    note = pid_path_note(pages) if kind == "pid" else None
+    if note:
+        ctx.event(EventType.LOG, "P&ID read path", {"level": "info", "text": note})
     text = "\n".join(p.text for p in pages)
     methods = ", ".join(sorted({p.method for p in pages}))
     unit = "tiles" if kind == "pid" else "pages"
@@ -332,8 +343,61 @@ def check_tag_types(ctx: ToolContext, tag_list: PidTagList) -> None:
             tag.equipment_type = canonical
 
 
+def tag_type(tag: str) -> str:
+    """Equipment type from the tag's letter prefix (TAG_TYPE_RULES); "Other" for unknown prefixes."""
+    rule = TAG_TYPE_RULES.get(tag_prefix(tag))
+    return rule[0] if rule else "Other"
+
+
+def _tag_base(tag: str) -> str:
+    """'P-201A' -> 'P-201' (drops the letter suffix)."""
+    return tag[:-1] if tag and tag[-1].isalpha() and "-" in tag else tag
+
+
+def _vision_only_tags(ctx: ToolContext, ocr_tags: set[str], vision_tags: list[str]) -> list[str]:
+    """Tags the vision check read that OCR did not, minus prompt echoes and suffix-less variants of OCR tags."""
+    ocr_bases = {_tag_base(t) for t in ocr_tags}
+    added = []
+    for tag in vision_tags:
+        if tag in ocr_tags or tag in added:
+            continue
+        if tag in PID_PROMPT_EXAMPLES:
+            ctx.warn(f"Vision check returned {tag!r}, an example from its prompt that OCR did not find; ignored.")
+        elif tag in ocr_bases:
+            ctx.warn(f"Vision check returned {tag!r}, a shorter form of an OCR tag; ignored.")
+        else:
+            added.append(tag)
+    return added
+
+
+def merge_pid_tags(ctx: ToolContext, pages: list[PageResult]) -> PidTagList:
+    """
+    Fast-path tag list (no LLM): OCR tags per tile, typed by prefix, plus tags only the
+    vision check read. Each tag keeps its tile(s); the description says how it was found.
+    """
+    confirm = next((p for p in pages if p.method == "vision_confirm"), None)
+    vision_tags = confirm.text.split() if confirm is not None else []
+    ocr_tags = {t for p in pages if p.method == "ocr_tiles" for t in p.text.split()}
+    checked = confirm is not None and not confirm.error
+    tags: list[PidTag] = []
+    for page in pages:
+        if page.method != "ocr_tiles":
+            continue
+        tile = PID_TILE_NAMES.index(page.tile) + 1 if page.tile in PID_TILE_NAMES else None
+        for tag in page.text.split():
+            how = ("OCR, confirmed by vision" if tag in vision_tags else "OCR only (vision did not read it)") \
+                if checked else "OCR (vision check unavailable)"
+            tags.append(PidTag(tag=tag, equipment_type=tag_type(tag), description=how, tile=tile))
+    for tag in _vision_only_tags(ctx, ocr_tags, vision_tags):
+        tags.append(PidTag(tag=tag, equipment_type=tag_type(tag), tile=None,
+                           description="Vision only (OCR did not find it); check on the drawing"))
+    return PidTagList(tags=tags, notes=pid_path_note(pages))
+
+
 def extract_pid_tags(ctx: ToolContext, doc_id: str) -> ToolOutcome:
     doc = _doc(ctx, doc_id)
+    if any(p.method in PID_FAST_METHODS for p in doc.pages):
+        return _save_tag_list(ctx, merge_pid_tags(ctx, doc.pages))
     blocks = []
     for number, page in enumerate(doc.pages, start=1):
         label = page.tile or f"page {page.page}"
@@ -348,7 +412,10 @@ def extract_pid_tags(ctx: ToolContext, doc_id: str) -> ToolOutcome:
             ctx.warn(f"Tag {tag.tag!r}: tile {tag.tile} does not exist; tile cleared.")
             tag.tile = None
     check_tag_types(ctx, tag_list)
+    return _save_tag_list(ctx, tag_list)
 
+
+def _save_tag_list(ctx: ToolContext, tag_list: PidTagList) -> ToolOutcome:
     artifact = office.make_excel(tag_list, task_id=ctx.task_id)
     ctx.artifact(artifact)
     list_id = ctx.scratchpad.new_id("tags")

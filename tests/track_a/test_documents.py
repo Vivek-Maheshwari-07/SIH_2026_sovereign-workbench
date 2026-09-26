@@ -215,6 +215,7 @@ def test_pid_extraction_produces_four_tiles_each_within_max_px(tmp_path, monkeyp
         return ChatResult(text="P-101\nV-201")
 
     monkeypatch.setattr(documents, "chat", fake_chat)
+    monkeypatch.setattr(documents, "_ocr_pid_tile", lambda tile: "")   # OCR finds nothing -> 4-tile vision path
 
     result = extract(image_path, kind="pid")
 
