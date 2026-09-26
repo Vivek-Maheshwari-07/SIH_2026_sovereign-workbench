@@ -71,7 +71,12 @@ NEXT_FINISH = "The file is ready. Next step: call finish with a short answer nam
 
 # Tag letter prefix -> (equipment type to use, words that count as agreeing with it).
 # Common ISA / plant conventions; extend here. Unknown prefixes keep the model's answer.
+# Instrument types name what is measured (wording as in demo/expected.md: "Flow transmitter", ...).
+# GENERIC_INSTRUMENT_WORDS alone ("Instrument", "Transmitter") agree but say too little: the
+# specific type from the prefix replaces them (see check_tag_types).
 _INSTRUMENT = ("instrument",)
+GENERIC_INSTRUMENT_WORDS = frozenset({"instrument", "transmitter", "indicator", "gauge", "controller"})
+MEASURED_VARIABLES = frozenset({"flow", "pressure", "level", "temperature"})
 TAG_TYPE_RULES: dict[str, tuple[str, tuple[str, ...]]] = {
     "P": ("Pump", ("pump",)),
     "V": ("Vessel", ("vessel", "drum", "separator", "receiver")),
@@ -80,6 +85,7 @@ TAG_TYPE_RULES: dict[str, tuple[str, tuple[str, ...]]] = {
     "C": ("Column", ("column", "tower")),
     "K": ("Compressor", ("compressor",)),
     "FT": ("Flow transmitter", ("flow", "transmitter") + _INSTRUMENT),
+    "FI": ("Flow indicator", ("flow", "indicator", "gauge") + _INSTRUMENT),
     "FIC": ("Flow indicating controller", ("flow", "controller") + _INSTRUMENT),
     "FV": ("Flow control valve", ("valve",)),
     "PT": ("Pressure transmitter", ("pressure", "transmitter") + _INSTRUMENT),
@@ -414,17 +420,31 @@ def tag_prefix(tag: str) -> str:
 
 
 def check_tag_types(ctx: ToolContext, tag_list: PidTagList) -> None:
-    """Correct equipment types that clearly contradict the tag's letter prefix (TAG_TYPE_RULES)."""
+    """
+    Check the model's equipment type against the tag's letter prefix (TAG_TYPE_RULES):
+      - agrees with a specific word (e.g. "Flow transmitter", "Mass flow meter" for FT): kept;
+      - only generic instrument words ("Instrument", "Transmitter"): replaced by the specific
+        prefix type ("Flow transmitter"), silently, since it is a refinement, not a disagreement;
+      - clearly disagrees (no accepted word, or another measured variable such as "Pressure
+        transmitter" on an LT tag): replaced by the prefix type, with a warning.
+    """
     for tag in tag_list.tags:
         rule = TAG_TYPE_RULES.get(tag_prefix(tag.tag))
         if rule is None:
             continue                                     # unknown prefix: keep the model's answer
         canonical, accepted = rule
         given = (tag.equipment_type or "").lower()
-        if not any(word in given for word in accepted):
-            ctx.warn(f"Tag {tag.tag!r}: model said {tag.equipment_type!r}, but prefix {tag_prefix(tag.tag)} "
-                     f"means {canonical}; using {canonical}.")
-            tag.equipment_type = canonical
+        specific = [w for w in accepted if w not in GENERIC_INSTRUMENT_WORDS]
+        other_variables = [v for v in MEASURED_VARIABLES - set(accepted) if v in given] \
+            if MEASURED_VARIABLES & set(accepted) else []
+        if any(word in given for word in specific) and not other_variables:
+            continue                                     # agrees, at least as specific: keep it
+        if any(word in given for word in accepted) and not other_variables:
+            tag.equipment_type = canonical               # generic "Instrument" -> "Flow transmitter"
+            continue
+        ctx.warn(f"Tag {tag.tag!r}: model said {tag.equipment_type!r}, but prefix {tag_prefix(tag.tag)} "
+                 f"means {canonical}; using {canonical}.")
+        tag.equipment_type = canonical
 
 
 def tag_type(tag: str) -> str:

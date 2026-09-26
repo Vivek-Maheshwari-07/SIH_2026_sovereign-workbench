@@ -763,7 +763,7 @@ def test_tag_types_checked_against_prefix_table():
     tags = PidTagList(tags=[
         PidTag(tag="P-101A", equipment_type="Valve"),            # wrong -> Pump
         PidTag(tag="t-301", equipment_type="Instrument"),        # wrong -> Tank (case-insensitive prefix)
-        PidTag(tag="FIC-101", equipment_type="Instrument"),      # generic instrument is fine
+        PidTag(tag="FIC-101", equipment_type="Instrument"),      # generic -> specific, no warning
         PidTag(tag="PT-102", equipment_type="Pressure transmitter"),
         PidTag(tag="PSV-7", equipment_type="Relief valve"),
         PidTag(tag="XV-201", equipment_type="Valve"),            # any "valve" wording agrees with XV
@@ -772,10 +772,72 @@ def test_tag_types_checked_against_prefix_table():
     ])
     agent_tools.check_tag_types(ctx, tags)
     assert [t.equipment_type for t in tags.tags] == [
-        "Pump", "Tank", "Instrument", "Pressure transmitter", "Relief valve", "Valve", "Heat exchanger",
-        "Level indicating controller"]
+        "Pump", "Tank", "Flow indicating controller", "Pressure transmitter", "Relief valve", "Valve",
+        "Heat exchanger", "Level indicating controller"]
     assert len([w for w in warns if "prefix" in w]) == 3
     assert agent_tools.tag_prefix(" fic-101 ") == "FIC" and agent_tools.tag_prefix("101") == ""
+
+
+INSTRUMENT_TYPES = {
+    "FT": "Flow transmitter", "PT": "Pressure transmitter", "LT": "Level transmitter", "TT": "Temperature transmitter",
+    "FI": "Flow indicator", "PI": "Pressure indicator", "LI": "Level indicator", "TI": "Temperature indicator",
+    "FIC": "Flow indicating controller", "PIC": "Pressure indicating controller",
+    "LIC": "Level indicating controller", "TIC": "Temperature indicating controller",
+}
+
+
+def _typed(pairs: list[tuple[str, str]]) -> tuple[list[str], list[str]]:
+    warns: list[str] = []
+    ctx = agent_tools.ToolContext(task_id="t", emit=lambda *a, **k: warns.append(a[2].get("text", "")),
+                                  add_artifact=lambda a: None)
+    tags = PidTagList(tags=[PidTag(tag=t, equipment_type=k) for t, k in pairs])
+    agent_tools.check_tag_types(ctx, tags)
+    return [t.equipment_type for t in tags.tags], warns
+
+
+@pytest.mark.parametrize("prefix, specific", sorted(INSTRUMENT_TYPES.items()))
+def test_instrument_prefix_gives_specific_type(prefix, specific):
+    assert agent_tools.tag_type(f"{prefix}-101") == specific                       # fast path
+    types, warns = _typed([(f"{prefix}-101", "Instrument"), (f"{prefix}-102", "instrument"),
+                           (f"{prefix}-103", {"T": "Transmitter", "I": "Indicator", "C": "Controller"}[prefix[-1]])])
+    assert types == [specific] * 3 and warns == []                                # model path, no warning
+
+
+def test_more_specific_model_answer_is_kept_and_wrong_variable_is_fixed():
+    types, warns = _typed([
+        ("FT-1", "Mass flow transmitter"),        # agrees and is more specific: kept
+        ("PI-2", "Pressure gauge"),               # agrees: kept
+        ("LT-3", "Pressure transmitter"),         # wrong measured variable -> Level transmitter
+        ("TIC-4", "Flow controller"),             # wrong variable -> Temperature indicating controller
+        ("FT-5", "Pump"),                         # clearly wrong -> Flow transmitter
+    ])
+    assert types == ["Mass flow transmitter", "Pressure gauge", "Level transmitter",
+                     "Temperature indicating controller", "Flow transmitter"]
+    assert len([w for w in warns if "prefix" in w]) == 3
+
+
+def test_equipment_types_unchanged_for_non_instruments():
+    types, warns = _typed([("P-201A", "Pump"), ("T-201", "Storage tank"), ("V-201", "Separator vessel"),
+                           ("E-201", "Heat exchanger"), ("XV-201", "Shutdown valve"), ("PSV-201", "Safety valve")])
+    assert types == ["Pump", "Storage tank", "Separator vessel", "Heat exchanger", "Shutdown valve", "Safety valve"]
+    assert warns == []
+
+
+def test_demo_pid_tags_match_expected_md_types():
+    from e2e_inputs import demo_pid_types, type_matches as _matches_expected
+
+    expected = demo_pid_types(Path(__file__).resolve().parents[2])
+    assert len(expected) == 12
+    for tag, kind in expected.items():                                              # fast path
+        assert _matches_expected(agent_tools.tag_type(tag), kind), (tag, agent_tools.tag_type(tag), kind)
+    # model path: the 4B model's usual generic answers become the expected.md wording
+    model_answers = {"T-201": "Tank", "XV-201": "Valve", "P-201A": "Pump", "P-201B": "Pump", "E-201": "Heat exchanger",
+                     "V-201": "Vessel", "PSV-201": "Pressure safety valve"}
+    types, warns = _typed([(tag, model_answers.get(tag, "Instrument")) for tag in expected])
+    assert warns == []
+    for (tag, kind), ours in zip(expected.items(), types):
+        assert _matches_expected(ours, kind), (tag, ours, kind)
+    assert dict(zip(expected, types))["FT-201"] == "Flow transmitter"
 
 
 def test_kb_hit_just_below_new_minimum_is_ignored(monkeypatch):

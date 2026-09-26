@@ -6,6 +6,7 @@ No real company names or logos.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pymupdf
@@ -157,3 +158,20 @@ def demo_input(name_contains: str, repo_root: Path) -> Path | None:
         if path.is_file() and name_contains.lower() in path.name.lower():
             return path
     return None
+
+
+# ---------------------------------------------------------------- demo P&ID answer key (demo/expected.md)
+DEMO_PID_NAME = "scenario_c_pid_generated.png"
+
+
+def demo_pid_types(repo_root: Path) -> dict[str, str]:
+    """Tag -> equipment type from the Scenario C1 table in demo/expected.md (the 12 demo tags)."""
+    md = (repo_root / "demo" / "expected.md").read_text(encoding="utf-8")
+    section = md.split("### C1.", 1)[1].split("**Pass", 1)[0]
+    return dict(re.findall(r"^\|\s*([A-Z]{1,4}-\d{2,4}[A-Z]?)\s*\|\s*([^|]+?)\s*\|", section, flags=re.M))
+
+
+def type_matches(ours: str, expected: str) -> bool:
+    """Every word of our equipment type appears in the expected.md type (text in brackets ignored)."""
+    words = set(re.findall(r"[a-z]+", re.sub(r"\([^)]*\)", " ", expected.lower())))
+    return bool(ours) and set(re.findall(r"[a-z]+", ours.lower())) <= words

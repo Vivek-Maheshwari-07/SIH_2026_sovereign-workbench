@@ -198,9 +198,20 @@ def test_live_scenario(live_env, network_guard, scenario, mode):
         xlsx = [a for a in state.artifacts if a.kind == "xlsx"]
         assert xlsx, "no Excel artifact"
         wb = load_workbook(io.BytesIO(_download(client, xlsx[-1])))
-        found = {str(r[0].value).strip().upper() for r in wb["Tags"].iter_rows(min_row=2) if r[0].value}
-        hits = [t for t in e2e_inputs.EXPECTED_TAGS if t in found]
-        print(f"   tags found {len(hits)}/10: {sorted(found)}")
-        assert len(hits) >= 6, sorted(found)
+        rows = {str(r[0].value).strip().upper(): str(r[1].value or "") for r in wb["Tags"].iter_rows(min_row=2)
+                if r[0].value}
+        found = set(rows)
+        if live_env["inputs"]["C"].name == e2e_inputs.DEMO_PID_NAME:
+            # The real demo drawing: demo/expected.md says all 12 tags, none invented, every type right.
+            expected = e2e_inputs.demo_pid_types(_REPO_ROOT)
+            for tag in sorted(found | set(expected)):
+                print(f"   {tag:8} {rows.get(tag, '-'):26} expected: {expected.get(tag, 'NOT A DEMO TAG')}")
+            assert found == set(expected), f"missing {sorted(set(expected) - found)}, invented {sorted(found - set(expected))}"
+            wrong = {t: (rows[t], k) for t, k in expected.items() if not e2e_inputs.type_matches(rows[t], k)}
+            assert not wrong, wrong
+        else:
+            hits = [t for t in e2e_inputs.EXPECTED_TAGS if t in found]
+            print(f"   tags found {len(hits)}/10: {sorted(found)}")
+            assert len(hits) >= 6, sorted(found)
 
     assert network_guard == [], network_guard
