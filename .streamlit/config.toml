@@ -1,0 +1,54 @@
+# Streamlit config for the Sovereign AI Workbench UI (Track B).
+# Goal: the UI never contacts the internet and never loads a remote font, image or script.
+
+[browser]
+# No usage telemetry (otherwise the page fetches data.streamlit.io/metrics.json and posts events).
+gatherUsageStats = false
+# Setting the address the browser uses stops Streamlit from looking up this machine's
+# external IP (checkip.amazonaws.com) when it prints URLs or checks a websocket origin.
+serverAddress = "127.0.0.1"
+serverPort = 8501
+
+[server]
+address = "127.0.0.1"
+port = 8501
+headless = true
+# No "enter your email" prompt on first run (that email is posted to data.streamlit.io).
+showEmailPrompt = false
+# No live reload on save during the demo; files served only from the app, not a static folder.
+runOnSave = false
+enableStaticServing = false
+maxUploadSize = 25            # same limit as WB_MAX_UPLOAD_MB
+
+[client]
+# No "Ask Google / Ask ChatGPT" links under errors.
+showErrorLinks = false
+# Hide the Deploy button and developer menu (they link to share.streamlit.io).
+toolbarMode = "minimal"
+# If anything slips past our own error handling, show a generic message, not a traceback.
+showErrorDetails = "none"
+showSidebarNavigation = false
+
+[theme]
+# "Control room" palette (ISA-101 style: neutral greys, colour only for status). Fonts are
+# Windows system fonts with the bundled Streamlit fonts as fallback; no webfont URL anywhere.
+base = "light"
+primaryColor = "#1F5FA8"
+backgroundColor = "#E3E5E8"
+secondaryBackgroundColor = "#F5F6F7"
+textColor = "#22272E"
+borderColor = "#C9CDD2"
+font = "Segoe UI, Source Sans, sans-serif"
+headingFont = "Bahnschrift, Segoe UI, sans-serif"
+codeFont = "Consolas, Source Code Pro, monospace"
+baseFontSize = 15
+baseRadius = "small"
+redColor = "#B3261E"
+greenColor = "#2E7D4F"
+orangeColor = "#C98A04"
+yellowColor = "#C98A04"
+blueColor = "#1F5FA8"
+
+[theme.sidebar]
+backgroundColor = "#F5F6F7"
+secondaryBackgroundColor = "#E3E5E8"
