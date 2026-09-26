@@ -1,12 +1,11 @@
 """
-Streamlit UI shell (Track B, ticket B3).
+Streamlit UI (Track B): "control room" layout.
 
 Run:  python -m streamlit run ui/app.py --server.address 127.0.0.1 --server.port 8501
 
-Sidebar: health lights, contract check, mode, demo scenarios, prewarm, reset.
-Main: chat + upload (left), task panels (right; Router/Plan/Timeline/Files/Network are
-placeholders filled by B4, B5, B7). All backend calls go through ui.api_client, which never
-raises; every error is shown with its ErrorInfo message.
+Top bar: title + NET-001 / FW-001 faceplate (5 s).  Sidebar: work orders, mode, status lamps
+(5 s), prewarm, reset.  Centre: live job panel (B4, 1 s while a job runs) and the chat box.
+Right: deliverables tray (B5). All backend calls go through ui.api_client, which never raises.
 """
 from __future__ import annotations
 
@@ -21,46 +20,20 @@ if str(_REPO_ROOT) not in sys.path:  # `streamlit run ui/app.py` puts ui/ on sys
 
 import streamlit as st  # noqa: E402
 
-from shared.contracts import (  # noqa: E402
-    TERMINAL_STATUSES,
-    ErrorInfo,
-    HealthResponse,
-    TaskCreate,
-    TaskMode,
-    TaskStatus,
-)
+from shared.contracts import ErrorInfo, HealthResponse, TaskCreate, TaskMode  # noqa: E402
 from ui import api_client  # noqa: E402
 from ui.api_client import ApiClient, ApiResult  # noqa: E402
+from ui.components import artifacts, net_faceplate, theme, timeline  # noqa: E402
+from ui.components.theme import esc  # noqa: E402
 from ui.config import ALLOWED_UPLOAD_TYPES, HEALTH_REFRESH_S, MAX_MESSAGE_CHARS  # noqa: E402
 from ui.scenarios import SCENARIOS, DemoScenario  # noqa: E402
 
 PAGE_TITLE = "Sovereign AI Workbench"
+TAGLINE = "Approval notes, calculation code and P&ID tag lists, drafted by local AI models."
 FOOTER = "Runs 100% offline on this machine."
 MODE_LABELS = {"Guided": TaskMode.GUIDED, "Agent": TaskMode.AGENT}
 HEALTH_MAX_AGE_S = 2.0   # reuse one /api/health result within the same page run
-
-CSS = """
-<style>
-.block-container {padding-top: 1.6rem; padding-bottom: 1rem;}
-.wb-header {border-left: 6px solid #1F4E79; padding: 0.2rem 0 0.2rem 0.9rem; margin-bottom: 1rem;}
-.wb-header h1 {font-size: 1.7rem; margin: 0; color: #1B2631; letter-spacing: 0.01em;}
-.wb-header p {margin: 0.15rem 0 0 0; color: #4A5A6A; font-size: 0.95rem;}
-.wb-section {font-size: 0.78rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
-             color: #4A5A6A; margin: 0.4rem 0 0.3rem 0;}
-.wb-light {display: flex; align-items: baseline; gap: 0.5rem; margin: 0.18rem 0; font-size: 0.9rem;}
-.wb-dot {width: 0.7rem; height: 0.7rem; border-radius: 50%; display: inline-block; flex: none;
-         position: relative; top: 0.05rem;}
-.wb-ok {background: #2E8B57;} .wb-bad {background: #C0392B;}
-.wb-reason {color: #5D6D7E; font-size: 0.8rem;}
-.wb-status {display: inline-block; padding: 0.1rem 0.55rem; border-radius: 0.25rem; font-weight: 600;
-            font-size: 0.85rem; background: #E6EBF1; color: #1B2631;}
-.wb-status-succeeded {background: #D4EDDA; color: #1E5631;}
-.wb-status-failed, .wb-status-cancelled {background: #F8D7DA; color: #7B1E24;}
-.wb-status-running, .wb-status-queued {background: #FFF3CD; color: #6B4E00;}
-.wb-footer {margin-top: 2rem; padding-top: 0.6rem; border-top: 1px solid #D5DCE4; color: #5D6D7E;
-            font-size: 0.82rem; text-align: center;}
-</style>
-"""
+TASK_QUERY_KEY = "task"  # ?task=<id> lets a page reload pick the job up again (from after=0)
 
 
 # ---------------------------------------------------------------- helpers
@@ -96,21 +69,17 @@ def current_mode() -> TaskMode:
     return MODE_LABELS[st.session_state.get("mode_label", "Guided")]
 
 
-def add_message(role: str, text: str) -> None:
-    st.session_state.setdefault("messages", []).append({"role": role, "text": text})
-
-
 def start_task(message: str, file_ids: list[str], mode: TaskMode, scenario: Optional[DemoScenario]) -> bool:
-    """Create a task and remember its id. Returns True on success."""
+    """Create a task and make it the current job. Returns True on success."""
     request = TaskCreate(message=message, file_ids=file_ids, mode=mode,
                          scenario=scenario.scenario if scenario else None)
     result = client().create_task(request)
     if result.data is None:
-        show_error("Could not start the task", result.error)
+        show_error("Could not start the job", result.error)
         return False
-    st.session_state["task_id"] = result.data.task_id
-    add_message("user", message)
-    add_message("assistant", f"Task {result.data.task_id} created ({mode.value} mode). Status: {result.data.status.value}.")
+    timeline.set_job(timeline.Job(task_id=result.data.task_id, message=message, mode=mode,
+                                  work_order=scenario.work_order if scenario else None))
+    st.query_params[TASK_QUERY_KEY] = result.data.task_id
     return True
 
 
@@ -134,37 +103,40 @@ def run_scenario(scn: DemoScenario) -> None:
         if file_id is None:
             return
         file_ids.append(file_id)
-    if start_task(scn.prompt, file_ids, current_mode(), scn):
-        st.success(f"Started: {scn.title}")
+    start_task(scn.prompt, file_ids, current_mode(), scn)
 
 
 def reset_session() -> None:
     for key in list(st.session_state.keys()):
         del st.session_state[key]
+    st.query_params.clear()
+
+
+def resume_from_url() -> None:
+    task_id = st.query_params.get(TASK_QUERY_KEY)
+    if task_id and timeline.get_job() is None:
+        timeline.set_job(timeline.Job(task_id=task_id))
 
 
 # ---------------------------------------------------------------- sidebar
-def light(label: str, ok: bool, reason: str) -> str:
-    css = "wb-ok" if ok else "wb-bad"
-    return (f'<div class="wb-light"><span class="wb-dot {css}"></span><span><b>{label}</b> '
-            f'<span class="wb-reason">{reason}</span></span></div>')
+def lamp(label: str, ok: bool, reason: str) -> str:
+    return (f'<div class="wb-lamp"><i class="{"b-ok" if ok else "b-alarm"}"></i>'
+            f'<span>{esc(label)} <span class="why">{esc(reason)}</span></span></div>')
 
 
-def health_lights(health: HealthResponse) -> str:
+def health_lamps(health: HealthResponse) -> str:
     kb_ok = health.kb_chunks > 0
-    rows = [
-        light("Ollama", health.ollama_ok, "models ready" if health.ollama_ok else "not reachable or model missing"),
-        light("Sandbox", health.sandbox_ok, "Docker and image ready" if health.sandbox_ok
-              else "Docker not running or image missing"),
-        light("Tesseract", health.tesseract_ok, "OCR ready" if health.tesseract_ok else "OCR engine not found"),
-        light("Knowledge base", kb_ok, f"{health.kb_chunks} chunks" if kb_ok else "empty, run scripts/ingest.py"),
-    ]
-    return "".join(rows)
+    return "".join([
+        lamp("Ollama", health.ollama_ok, "models ready" if health.ollama_ok else "not reachable or model missing"),
+        lamp("Sandbox", health.sandbox_ok, "Docker ready" if health.sandbox_ok else "Docker not running or image missing"),
+        lamp("Tesseract", health.tesseract_ok, "OCR ready" if health.tesseract_ok else "OCR engine not found"),
+        lamp("Knowledge base", kb_ok, f"{health.kb_chunks} chunks" if kb_ok else "empty, run scripts/ingest.py"),
+    ])
 
 
 @st.fragment(run_every=HEALTH_REFRESH_S)
 def health_panel() -> None:
-    st.markdown('<div class="wb-section">System health</div>', unsafe_allow_html=True)
+    st.markdown('<div class="wb-h">System status</div>', unsafe_allow_html=True)
     result = fetch_health()
     if result.data is None:
         if backend_down(result):
@@ -172,16 +144,25 @@ def health_panel() -> None:
         else:
             show_error("Health check failed", result.error)
     else:
-        st.markdown(health_lights(result.data), unsafe_allow_html=True)
-        st.caption(f"Overall: {result.data.status}  |  checked {time.strftime('%H:%M:%S')}")
+        st.markdown(health_lamps(result.data), unsafe_allow_html=True)
     warning = result.version_warning()
     if warning:
         st.error(warning)
 
 
+def work_orders() -> None:
+    st.markdown('<div class="wb-h">Work orders</div>', unsafe_allow_html=True)
+    for scn in SCENARIOS:
+        if st.button(f"**{scn.work_order}** {scn.title}", key=f"wo_{scn.key}", width="stretch"):
+            run_scenario(scn)
+        st.markdown(f'<div class="wb-wo">{esc(scn.description)}<br>'
+                    f'<span class="io">{esc(scn.input_type)} → {esc(scn.output_type)}</span></div>',
+                    unsafe_allow_html=True)
+
+
 def prewarm_panel() -> None:
     if st.button("Prewarm models", key="prewarm", width="stretch",
-                 help="Load the models into RAM before the demo (about 20 s)."):
+                 help="Load the models into memory before the demo (about 20 s)."):
         with st.spinner("Loading models..."):
             result = client().prewarm()
         if result.data is None:
@@ -197,15 +178,11 @@ def prewarm_panel() -> None:
 
 def sidebar() -> None:
     with st.sidebar:
-        health_panel()
+        work_orders()
+        st.radio("Mode", list(MODE_LABELS), key="mode_label", horizontal=True,
+                 help="Guided runs the fixed, tested pipeline for a work order. Agent lets the model plan the steps.")
         st.divider()
-        st.markdown('<div class="wb-section">Mode</div>', unsafe_allow_html=True)
-        st.radio("Mode", list(MODE_LABELS), key="mode_label", horizontal=True, label_visibility="collapsed",
-                 help="Guided runs a fixed, tested pipeline for the demo scenarios. Agent lets the model plan.")
-        st.markdown('<div class="wb-section">Demo scenarios</div>', unsafe_allow_html=True)
-        for scn in SCENARIOS:
-            if st.button(scn.title, key=f"scn_{scn.key}", help=scn.description, width="stretch"):
-                run_scenario(scn)
+        health_panel()
         st.divider()
         prewarm_panel()
         if st.button("Reset session", key="reset", width="stretch"):
@@ -214,24 +191,25 @@ def sidebar() -> None:
 
 
 # ---------------------------------------------------------------- main area
-def chat_column() -> None:
-    st.markdown('<div class="wb-section">Assistant</div>', unsafe_allow_html=True)
-    history = st.container(height=420, border=True)
-    with history:
-        messages = st.session_state.get("messages", [])
-        if not messages:
-            st.caption("Pick a demo scenario on the left, or type a request below.")
-        for msg in messages:
-            with st.chat_message(msg["role"]):
-                st.write(msg["text"])
+def top_bar() -> None:
+    left, right = st.columns([3, 1.4], vertical_alignment="center")
+    left.markdown(f'<h1 class="wb-title">{PAGE_TITLE}</h1><p class="wb-sub">{TAGLINE}</p>', unsafe_allow_html=True)
+    with right:
+        net_faceplate.render()
 
-    uploader_key = f"uploads_{st.session_state.get('uploader_n', 0)}"
-    files = st.file_uploader("Attach files", type=ALLOWED_UPLOAD_TYPES, accept_multiple_files=True,
-                             key=uploader_key)
-    prompt = st.chat_input("Describe the task, e.g. 'Summarise this inspection report'",
-                           max_chars=MAX_MESSAGE_CHARS, key="chat")
-    if prompt:
-        send_message(prompt, files or [])
+
+def chat_box() -> None:
+    value = st.chat_input("Describe the job, e.g. 'Summarise the confined space SOP'. Attach files with the clip.",
+                          key="chat", max_chars=MAX_MESSAGE_CHARS, accept_file="multiple",
+                          file_type=ALLOWED_UPLOAD_TYPES)
+    if not value:
+        return
+    text = value if isinstance(value, str) else (value.text or "")
+    files = [] if isinstance(value, str) else list(value.files or [])
+    if not text.strip():
+        st.warning("Write what the job should do; files alone are not enough.")
+        return
+    send_message(text.strip(), files)
 
 
 def send_message(prompt: str, files: list) -> None:
@@ -242,55 +220,12 @@ def send_message(prompt: str, files: list) -> None:
             return
         file_ids.append(file_id)
     if start_task(prompt, file_ids, current_mode(), None):
-        st.session_state["uploader_n"] = st.session_state.get("uploader_n", 0) + 1  # clears the uploader
         st.rerun()
 
 
-def placeholder(title: str, ticket: str) -> None:
-    with st.container(border=True):
-        st.markdown(f'<div class="wb-section">{title}</div>', unsafe_allow_html=True)
-        st.caption(f"Filled in {ticket}.")
-
-
-def task_panel() -> None:
-    with st.container(border=True):
-        st.markdown('<div class="wb-section">Current task</div>', unsafe_allow_html=True)
-        task_id = st.session_state.get("task_id")
-        if not task_id:
-            st.caption("No task yet.")
-            return
-        top = st.columns([3, 1])
-        top[0].code(task_id, language=None)
-        top[1].button("Refresh", key="refresh_task", width="stretch")
-        result = client().get_task(task_id)
-        if result.data is None:
-            show_error("Could not load the task", result.error, warn=True)
-            return
-        state = result.data
-        status = state.status.value
-        elapsed = f" | {state.elapsed_s:.0f} s" if state.elapsed_s is not None else ""
-        st.markdown(f'<span class="wb-status wb-status-{status}">{status.upper()}</span>'
-                    f'<span class="wb-reason"> {state.mode.value} mode{elapsed}</span>', unsafe_allow_html=True)
-        if state.status == TaskStatus.FAILED and state.error is not None:
-            show_error("Task failed", state.error)
-        elif state.status not in TERMINAL_STATUSES:
-            st.caption("Running. Press Refresh to update (live timeline comes in B4).")
-
-
-def results_column() -> None:
-    task_panel()
-    placeholder("Router", "B4")
-    placeholder("Plan", "B4")
-    placeholder("Timeline", "B4")
-    placeholder("Files", "B5")
-    placeholder("Network", "B7")
-
-
-def header() -> None:
-    st.markdown(CSS, unsafe_allow_html=True)
-    st.markdown(f'<div class="wb-header"><h1>{PAGE_TITLE}</h1>'
-                '<p>On-premise agentic AI for inspection reports, engineering code and P&amp;ID drawings</p></div>',
-                unsafe_allow_html=True)
+def tray_panel() -> None:
+    job = timeline.get_job()
+    artifacts.tray(timeline.artifacts_of(job) if job else [])
 
 
 def footer() -> None:
@@ -302,26 +237,31 @@ def wait_for_backend() -> None:
     """While the backend is down: re-check every few seconds and reload the page once it is up."""
     if not backend_down(fetch_health()):
         st.rerun(scope="app")
-    st.caption(f"Checking again every {HEALTH_REFRESH_S:g} s...  (last check {time.strftime('%H:%M:%S')})")
+    st.caption(f"Checking again every {HEALTH_REFRESH_S:g} s (last check {time.strftime('%H:%M:%S')}).")
 
 
 def main() -> None:
     st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state="expanded")
-    header()
+    theme.inject()
     health = fetch_health()
     if backend_down(health):
+        st.markdown(f'<h1 class="wb-title">{PAGE_TITLE}</h1>', unsafe_allow_html=True)
         st.error(f"Backend not reachable at {client().base_url}")
-        st.markdown("Start it with `uvicorn backend.main:app --host 127.0.0.1 --port 8000`, "
-                    "then this page reloads by itself.")
+        st.markdown("Start it with `uvicorn backend.main:app --host 127.0.0.1 --port 8000`; "
+                    "this page reloads by itself when it answers.")
         wait_for_backend()
         footer()
         return
+    resume_from_url()
     sidebar()
-    left, right = st.columns([1.15, 1], gap="large")
-    with left:
-        chat_column()
+    top_bar()
+    centre, right = st.columns([2.1, 1], gap="large")
+    with centre:
+        timeline.render()
+        chat_box()
     with right:
-        results_column()
+        job = timeline.get_job()
+        st.fragment(tray_panel, run_every=1.0 if job is not None and job.active else None)()
     footer()
 
 

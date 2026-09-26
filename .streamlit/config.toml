@@ -30,9 +30,25 @@ showErrorDetails = "none"
 showSidebarNavigation = false
 
 [theme]
-# Default Streamlit fonts are bundled in the local package; no webfont URL is set here.
+# "Control room" palette (ISA-101 style: neutral greys, colour only for status). Fonts are
+# Windows system fonts with the bundled Streamlit fonts as fallback; no webfont URL anywhere.
 base = "light"
-primaryColor = "#1F4E79"
-backgroundColor = "#F5F7FA"
-secondaryBackgroundColor = "#E6EBF1"
-textColor = "#1B2631"
+primaryColor = "#1F5FA8"
+backgroundColor = "#E3E5E8"
+secondaryBackgroundColor = "#F5F6F7"
+textColor = "#22272E"
+borderColor = "#C9CDD2"
+font = "Segoe UI, Source Sans, sans-serif"
+headingFont = "Bahnschrift, Segoe UI, sans-serif"
+codeFont = "Consolas, Source Code Pro, monospace"
+baseFontSize = 15
+baseRadius = "small"
+redColor = "#B3261E"
+greenColor = "#2E7D4F"
+orangeColor = "#C98A04"
+yellowColor = "#C98A04"
+blueColor = "#1F5FA8"
+
+[theme.sidebar]
+backgroundColor = "#F5F6F7"
+secondaryBackgroundColor = "#E3E5E8"

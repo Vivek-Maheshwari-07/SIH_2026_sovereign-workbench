@@ -24,8 +24,11 @@ DEMO_INPUTS_DIR = _REPO_ROOT / "demo" / "inputs"
 @dataclass(frozen=True)
 class DemoScenario:
     scenario: Scenario
+    work_order: str                      # "WO-A", shown in the sidebar and the job header
     title: str
     description: str
+    input_type: str
+    output_type: str
     prompt: str
     default_mode: TaskMode = TaskMode.GUIDED
     demo_file: Optional[Path] = None     # uploaded before the task is created
@@ -39,16 +42,22 @@ class DemoScenario:
 SCENARIOS: list[DemoScenario] = [
     DemoScenario(
         scenario=Scenario.INSPECTION_NOTE,
-        title="Inspection report to approval note",
-        description="Scanned tank inspection report (OCR) to a draft approval note (.docx) citing SOPs.",
+        work_order="WO-A",
+        title="Inspection approval note",
+        description="Drafts the approval note and cites the SOPs.",
+        input_type="Scanned PDF",
+        output_type="Word approval note",
         prompt="Draft an approval note from this scanned inspection report, citing the relevant SOPs.",
         demo_file=DEMO_INPUTS_DIR / "scenario_a_report_1.pdf",
         mime_type="application/pdf",
     ),
     DemoScenario(
         scenario=Scenario.CODE_CALC,
-        title="Engineering calculation code",
-        description="Pipe wall thickness code with tests, run in the offline sandbox.",
+        work_order="WO-B",
+        title="Pipe wall thickness calc",
+        description="Writes code and tests, runs them offline.",
+        input_type="Text request",
+        output_type="Python code + tests",
         prompt=(
             "Write a function for pipe wall thickness from design pressure, outside diameter "
             "and allowable stress, using t = P*D / (2*S), with tests, and print the calculation steps. "
@@ -60,8 +69,11 @@ SCENARIOS: list[DemoScenario] = [
     ),
     DemoScenario(
         scenario=Scenario.PID_TAGS,
-        title="P&ID drawing to tag list",
-        description="Equipment and instrument tags from a P&ID image to an Excel tag list (.xlsx).",
+        work_order="WO-C",
+        title="P&ID tag register",
+        description="Lists every equipment and instrument tag.",
+        input_type="P&ID image",
+        output_type="Excel tag list",
         prompt="Extract every equipment and instrument tag from this P&ID drawing into an Excel tag list.",
         demo_file=DEMO_INPUTS_DIR / "scenario_c_pid_generated.png",
         mime_type="image/png",

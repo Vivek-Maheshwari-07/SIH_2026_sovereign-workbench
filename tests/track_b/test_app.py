@@ -1,115 +1,62 @@
 """
-B3 tests: ui/app.py rendered with Streamlit's AppTest and a fake ApiClient (no backend),
+App shell tests: ui/app.py rendered with Streamlit's AppTest and a fake ApiClient (no backend),
 plus checks on ui/scenarios.py and ui/config.py.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import html
 from pathlib import Path
 
 import pytest
+from fake_client import BASE_URL, TASK_ID, FakeClient, health, net_status, ok
 from streamlit.testing.v1 import AppTest
 
-from shared.contracts import (
-    CONTRACT_VERSION,
-    ERROR_CODES,
-    ErrorInfo,
-    FileRef,
-    HealthResponse,
-    PrewarmResult,
-    Scenario,
-    TaskCreate,
-    TaskCreated,
-    TaskMode,
-    TaskState,
-    TaskStatus,
-)
+from shared.contracts import CONTRACT_VERSION, ERROR_CODES, ErrorInfo, Scenario, TaskMode
 from ui import api_client
 from ui.api_client import ApiResult
+from ui.components.net_faceplate import faceplate_html
 from ui.config import ALLOWED_UPLOAD_TYPES, MAX_MESSAGE_CHARS
 from ui.scenarios import SCENARIOS, get_scenario
 
 APP = str(Path(__file__).resolve().parents[2] / "ui" / "app.py")
-BASE_URL = "http://127.0.0.1:8000"
-NOW = datetime(2026, 9, 26, tzinfo=timezone.utc)
 
 
-def health(ok: bool = True, chunks: int = 185) -> HealthResponse:
-    return HealthResponse(status="ok" if ok else "down", contract_version=CONTRACT_VERSION, mock=False,
-                          ollama_ok=ok, sandbox_ok=ok, tesseract_ok=ok, kb_chunks=chunks, models=[], time=NOW)
-
-
-class FakeClient:
-    """Stands in for ApiClient; records calls. Same method names and ApiResult returns."""
-
-    def __init__(self, health_result: ApiResult) -> None:
-        self.base_url = BASE_URL
-        self.health_result = health_result
-        self.uploads: list[tuple[str, int, str]] = []
-        self.created: list[TaskCreate] = []
-        self.prewarm_calls = 0
-
-    def health(self) -> ApiResult[HealthResponse]:
-        return self.health_result
-
-    def upload_file(self, filename: str, content: bytes, mime_type: str = "") -> ApiResult[FileRef]:
-        self.uploads.append((filename, len(content), mime_type))
-        return ApiResult(data=FileRef(file_id=f"f_{len(self.uploads):012x}", filename=filename, mime_type=mime_type,
-                                      size_bytes=len(content), is_image=mime_type.startswith("image/")),
-                         status_code=200, contract_version=CONTRACT_VERSION)
-
-    def create_task(self, request: TaskCreate) -> ApiResult[TaskCreated]:
-        self.created.append(request)
-        return ApiResult(data=TaskCreated(task_id="t_0123456789ab", status=TaskStatus.QUEUED), status_code=202,
-                         contract_version=CONTRACT_VERSION)
-
-    def get_task(self, task_id: str) -> ApiResult[TaskState]:
-        last = self.created[-1]
-        return ApiResult(data=TaskState(task_id=task_id, status=TaskStatus.RUNNING, mode=last.mode,
-                                        scenario=last.scenario, message=last.message, created_at=NOW),
-                         status_code=200, contract_version=CONTRACT_VERSION)
-
-    def prewarm(self) -> ApiResult[PrewarmResult]:
-        self.prewarm_calls += 1
-        return ApiResult(data=PrewarmResult(warmed=["general (9.1 s)", "coder (4.0 s)"], failed=[], duration_ms=13100),
-                         status_code=200, contract_version=CONTRACT_VERSION)
-
-
-def ok_health(**kw) -> ApiResult:
-    return ApiResult(data=health(**kw), status_code=200, contract_version=CONTRACT_VERSION)
-
-
-def run_app(monkeypatch, fake: FakeClient) -> AppTest:
+def run_app(monkeypatch, fake: FakeClient, query: dict | None = None) -> AppTest:
     monkeypatch.setattr(api_client, "get_client", lambda: fake)
     at = AppTest.from_file(APP, default_timeout=30)
+    for k, v in (query or {}).items():
+        at.query_params[k] = v
     at.run()
     assert not at.exception, [e.message for e in at.exception]
     return at
 
 
-def all_markdown(at: AppTest) -> str:
+def page_html(at: AppTest) -> str:
     return "\n".join(m.value for m in at.markdown)  # includes the sidebar
 
 
 # ---------------------------------------------------------------- rendering
 def test_renders_with_healthy_backend(monkeypatch):
-    at = run_app(monkeypatch, FakeClient(ok_health()))
-    text = all_markdown(at)
+    at = run_app(monkeypatch, FakeClient())
+    text = page_html(at)
     assert "Sovereign AI Workbench" in text and "Runs 100% offline on this machine." in text
     for label in ("Ollama", "Sandbox", "Tesseract", "Knowledge base", "185 chunks"):
         assert label in text
-    assert "wb-dot wb-bad" not in text and text.count("wb-dot wb-ok") == 4
-    assert [b.key for b in at.sidebar.button if b.key.startswith("scn_")] == [f"scn_{s.key}" for s in SCENARIOS]
+    assert text.count('<i class="b-ok">') == 4 and 'class="b-alarm"' not in text
+    assert [b.key for b in at.sidebar.button if b.key.startswith("wo_")] == [f"wo_{s.key}" for s in SCENARIOS]
+    for scn in SCENARIOS:
+        assert scn.work_order in at.sidebar.button(key=f"wo_{scn.key}").label
+        assert html.escape(f"{scn.input_type} → {scn.output_type}") in text
     assert at.sidebar.radio(key="mode_label").value == "Guided"
-    for section in ("Router", "Plan", "Timeline", "Files", "Network"):
-        assert f">{section}<" in text
+    assert "No job running. Pick a work order on the left or describe the job below." in text
+    assert "Deliverables" in text and "Filled in" not in text
     assert not at.error
 
 
 def test_renders_with_unhealthy_backend(monkeypatch):
-    at = run_app(monkeypatch, FakeClient(ok_health(ok=False, chunks=0)))
-    text = all_markdown(at)
-    assert text.count("wb-dot wb-bad") == 4
+    at = run_app(monkeypatch, FakeClient(ok(health(ok=False, chunks=0))))
+    text = page_html(at)
+    assert text.count('<i class="b-alarm">') == 4
     assert "Docker not running or image missing" in text and "run scripts/ingest.py" in text
 
 
@@ -121,8 +68,7 @@ def test_backend_down_banner(monkeypatch):
 
 
 def test_version_mismatch_shows_red_warning(monkeypatch):
-    result = ApiResult(data=health(), status_code=200, contract_version="0.9.0")
-    at = run_app(monkeypatch, FakeClient(result))
+    at = run_app(monkeypatch, FakeClient(ApiResult(data=health(), status_code=200, contract_version="0.9.0")))
     assert any("Contract version mismatch" in e.value for e in at.sidebar.error)
 
 
@@ -133,12 +79,34 @@ def test_health_api_error_is_friendly(monkeypatch):
     assert any("Health check failed: Unexpected server error" in e.value for e in at.sidebar.error)
 
 
+# ---------------------------------------------------------------- NET-001 faceplate
+def test_faceplate_green_when_zero():
+    html = faceplate_html(net_status(seen=0, now=0, firewall=True))
+    assert "NET-001" in html and 'val wb-num c-ok">0<' in html and "Blocked" in html
+
+
+def test_faceplate_red_when_external_connections():
+    html = faceplate_html(net_status(seen=2, now=1, firewall=False))
+    assert 'val wb-num c-alarm">2<' in html and "open now: 1" in html and "Open" in html
+
+
+def test_faceplate_without_data():
+    assert "No network data" in faceplate_html(None, "refused")
+
+
+def test_faceplate_red_in_app(monkeypatch):
+    fake = FakeClient()
+    fake.network_result = ok(net_status(seen=3, now=0, firewall=None))
+    text = page_html(run_app(monkeypatch, fake))
+    assert 'c-alarm">3<' in text and "Unknown" in text
+
+
 # ---------------------------------------------------------------- actions
 @pytest.mark.parametrize("scn", SCENARIOS, ids=lambda s: s.key)
-def test_scenario_button_creates_task(monkeypatch, scn):
-    fake = FakeClient(ok_health())
+def test_work_order_creates_task(monkeypatch, scn):
+    fake = FakeClient()
     at = run_app(monkeypatch, fake)
-    at.sidebar.button(key=f"scn_{scn.key}").click().run()
+    at.sidebar.button(key=f"wo_{scn.key}").click().run()
     assert not at.exception
     assert len(fake.created) == 1
     req = fake.created[0]
@@ -148,42 +116,45 @@ def test_scenario_button_creates_task(monkeypatch, scn):
         assert req.file_ids == ["f_000000000001"]
     else:
         assert fake.uploads == [] and req.file_ids == []
-    assert at.session_state["task_id"] == "t_0123456789ab"
-    assert any("t_0123456789ab" in c.value for c in at.code)
+    job = at.session_state["job"]
+    assert job.task_id == TASK_ID and job.work_order == scn.work_order
+    assert at.query_params["task"] == [TASK_ID]
+    assert f"Job {TASK_ID}" in page_html(at)
 
 
-def test_scenario_button_uses_agent_mode(monkeypatch):
-    fake = FakeClient(ok_health())
+def test_work_order_uses_agent_mode(monkeypatch):
+    fake = FakeClient()
     at = run_app(monkeypatch, fake)
     at.sidebar.radio(key="mode_label").set_value("Agent").run()
-    at.sidebar.button(key="scn_code_calc").click().run()
+    at.sidebar.button(key="wo_code_calc").click().run()
     assert fake.created[0].mode == TaskMode.AGENT and fake.created[0].scenario == Scenario.CODE_CALC
 
 
 def test_chat_creates_task_without_scenario(monkeypatch):
-    fake = FakeClient(ok_health())
+    fake = FakeClient()
     at = run_app(monkeypatch, fake)
     at.chat_input(key="chat").set_value("Summarise the SOP on confined spaces").run()
     assert not at.exception
     req = fake.created[0]
     assert req.message == "Summarise the SOP on confined spaces" and req.scenario is None
     assert req.mode == TaskMode.GUIDED and req.file_ids == []
-    assert at.session_state["messages"][0] == {"role": "user", "text": "Summarise the SOP on confined spaces"}
+    assert at.session_state["job"].message == "Summarise the SOP on confined spaces"
+    assert "Summarise the SOP on confined spaces" in page_html(at)  # the user's message is shown
 
 
 def test_create_task_error_is_friendly(monkeypatch):
-    fake = FakeClient(ok_health())
+    fake = FakeClient()
     fake.create_task = lambda req: ApiResult(error=ErrorInfo(code="BAD_REQUEST", message="scenario missing"),
                                              failure="api", status_code=422)
     at = run_app(monkeypatch, fake)
-    at.sidebar.button(key="scn_code_calc").click().run()
+    at.sidebar.button(key="wo_code_calc").click().run()
     assert not at.exception
-    assert any("Could not start the task: scenario missing" in e.value for e in at.sidebar.error)
-    assert "task_id" not in at.session_state
+    assert any("Could not start the job: scenario missing" in e.value for e in at.sidebar.error)
+    assert "job" not in at.session_state
 
 
 def test_prewarm_shows_items(monkeypatch):
-    fake = FakeClient(ok_health())
+    fake = FakeClient()
     at = run_app(monkeypatch, fake)
     at.sidebar.button(key="prewarm").click().run()
     assert fake.prewarm_calls == 1
@@ -191,21 +162,31 @@ def test_prewarm_shows_items(monkeypatch):
 
 
 def test_reset_clears_state(monkeypatch):
-    fake = FakeClient(ok_health())
+    fake = FakeClient()
     at = run_app(monkeypatch, fake)
     at.sidebar.radio(key="mode_label").set_value("Agent").run()
-    at.sidebar.button(key="scn_code_calc").click().run()
-    assert "task_id" in at.session_state
+    at.sidebar.button(key="wo_code_calc").click().run()
+    assert "job" in at.session_state
     at.sidebar.button(key="reset").click().run()
     assert not at.exception
-    assert "task_id" not in at.session_state and "messages" not in at.session_state
+    assert "job" not in at.session_state and "task" not in at.query_params
     assert at.sidebar.radio(key="mode_label").value == "Guided"
+
+
+def test_reload_resumes_job_from_url(monkeypatch):
+    from fake_client import all_event_pages
+
+    fake = FakeClient(pages=all_event_pages())
+    at = run_app(monkeypatch, fake, query={"task": TASK_ID})
+    assert at.session_state["job"].task_id == TASK_ID
+    assert fake.polls[0] == 0  # a new session starts from after=0
 
 
 # ---------------------------------------------------------------- scenarios / config data
 @pytest.mark.parametrize("scn", SCENARIOS, ids=lambda s: s.key)
 def test_scenario_data(scn):
     assert scn.prompt.strip() and scn.title.strip() and scn.description.strip()
+    assert scn.work_order.startswith("WO-") and scn.input_type and scn.output_type
     assert len(scn.prompt) <= MAX_MESSAGE_CHARS
     assert scn.default_mode == TaskMode.GUIDED
     if scn.demo_file is not None:
@@ -215,10 +196,10 @@ def test_scenario_data(scn):
 
 def test_scenarios_cover_contract():
     assert {s.scenario for s in SCENARIOS} == set(Scenario)
+    assert [s.work_order for s in SCENARIOS] == ["WO-A", "WO-B", "WO-C"]
     assert get_scenario(Scenario.PID_TAGS).demo_file is not None
     assert get_scenario(Scenario.CODE_CALC).demo_file is None
 
 
 def test_allowed_upload_types_match_contract():
-    message = ERROR_CODES["UNSUPPORTED_FILE"]
-    assert "/".join(ALLOWED_UPLOAD_TYPES) in message
+    assert "/".join(ALLOWED_UPLOAD_TYPES) in ERROR_CODES["UNSUPPORTED_FILE"]
