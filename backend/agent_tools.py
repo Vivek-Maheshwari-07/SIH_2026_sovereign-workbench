@@ -23,7 +23,8 @@ from backend.audit import write_audit_record
 from backend.file_store import file_store
 from backend.flows import code_flow
 from backend.registry import registry
-from backend.tools import knowledge, office
+from backend.settings import settings
+from backend.tools import findings, knowledge, office
 from backend.tools.documents import (
     PID_FAST_METHODS,
     PID_PROMPT_EXAMPLES,
@@ -54,6 +55,16 @@ MIN_KB_SCORE = 0.57                 # hits below this are never shown or cited (
 DOC_PROMPT_MAX_CHARS = 14000        # document text given to draft_approval_note (fits WB_NUM_CTX 8192)
 MAX_TOP_K = 10
 MAX_FILLED_SOP_REFS = 3             # retrieved passages cited when the model cites none
+MAX_KB_QUERIES = findings.MAX_KB_QUERIES   # search_knowledge with `queries`: most searches per call
+# The approval note must come out the same every run (severities were High in some runs and Medium
+# in others at WB_TEMPERATURE 0.2). Greedy decoding + a fixed seed, for draft_approval_note only.
+NOTE_TEMPERATURE = 0.0
+NOTE_SEED = 42
+NOTE_OPTIONS = {"temperature": NOTE_TEMPERATURE, "seed": NOTE_SEED}
+# With 3 SOP passages the note prompt is ~2,400 tokens; a first (uncached) call measured 203-215 s on
+# the demo laptop, over WB_LLM_TIMEOUT_S (180 s). That timed out, and the retry wasted ~180 s per run.
+# The note call alone gets this longer timeout (never shorter than WB_LLM_TIMEOUT_S).
+NOTE_TIMEOUT_S = 420
 AUDIT_ARGS_CHARS = 300              # tool arguments kept in the audit record
 # Seen live: after the Excel file was saved the 4B model wandered off into run_code_task and timed out.
 NEXT_FINISH = "The file is ready. Next step: call finish with a short answer naming the file."
@@ -172,9 +183,11 @@ def _one_line(text: str, limit: int) -> str:
     return trim(" ".join(text.split()), limit)
 
 
-def _llm_json(ctx: ToolContext, schema, messages: list[dict[str, Any]], purpose: str):
+def _llm_json(ctx: ToolContext, schema, messages: list[dict[str, Any]], purpose: str,
+              options: Optional[dict[str, Any]] = None, timeout_s: Optional[float] = None):
     model = registry.model_for_task(TaskType.DOCUMENT)
-    result = llm_client.chat_json_meta(model.ollama_name, messages, schema, purpose=purpose)
+    result = llm_client.chat_json_meta(model.ollama_name, messages, schema, purpose=purpose, options=options,
+                                       timeout_s=timeout_s)
     ctx.event(EventType.LLM_CALL, f"{model.id}: {purpose}", {
         "model_id": model.id, "purpose": purpose, "duration_ms": result.duration_ms, "tokens_out": result.tokens_out,
     })
@@ -214,8 +227,41 @@ def read_document(ctx: ToolContext, file_id: str, kind: str = "auto") -> ToolOut
     return ToolOutcome(ok=True, summary=summary)
 
 
-def search_knowledge(ctx: ToolContext, query: str, top_k: int = 4) -> ToolOutcome:
+def _search_many(ctx: ToolContext, queries: list[str], top_k: int) -> ToolOutcome:
+    """Search each query, merge unique hits (best score kept), keep only hits >= MIN_KB_SCORE."""
+    merged: dict[tuple[str, Optional[int], str], KBHit] = {}
+    report = []
+    for number, query in enumerate(queries, start=1):
+        hits = knowledge.search(query, top_k)
+        best = hits[0] if hits else None
+        passed = sum(h.score >= MIN_KB_SCORE for h in hits)
+        report.append(f"q{number} best {best.score:.3f} {best.source} p.{best.page} ({passed} >= {MIN_KB_SCORE:.2f}): "
+                      f"{_one_line(query, 90)}" if best else f"q{number} no hits: {_one_line(query, 90)}")
+        for hit in hits:
+            key = (hit.source, hit.page, hit.text)
+            if hit.score >= MIN_KB_SCORE and (key not in merged or hit.score > merged[key].score):
+                merged[key] = hit
+    ctx.event(EventType.LOG, "Knowledge base queries", {"level": "info", "text": "\n".join(report)})
+    if not merged:
+        return ToolOutcome(ok=True, summary=(
+            f"No relevant SOP passages found for {len(queries)} queries; minimum score is {MIN_KB_SCORE:.2f}. "
+            "Do not cite any SOP for this."))
+    lines = []
+    for hit in sorted(merged.values(), key=lambda h: h.score, reverse=True):
+        kb_id = ctx.scratchpad.new_id("kb")
+        ctx.scratchpad.kb_hits[kb_id] = hit
+        page = f" p.{hit.page}" if hit.page else ""
+        lines.append(f"{kb_id}: {hit.source}{page} (score {hit.score:.2f}): {_one_line(hit.text, KB_SNIPPET_CHARS // 2)}")
+    return ToolOutcome(ok=True, summary=f"{len(merged)} relevant passage(s) from {len(queries)} queries:\n"
+                                        + "\n".join(lines))
+
+
+def search_knowledge(ctx: ToolContext, query: str, top_k: int = 4,
+                     queries: Optional[list[str]] = None) -> ToolOutcome:
     top_k = max(1, min(int(top_k), MAX_TOP_K))
+    all_queries = list(dict.fromkeys(q.strip() for q in [query, *(queries or [])] if isinstance(q, str) and q.strip()))
+    if len(all_queries) > 1:
+        return _search_many(ctx, all_queries[:MAX_KB_QUERIES], top_k)
     hits = knowledge.search(query, top_k)
     relevant = [h for h in hits if h.score >= MIN_KB_SCORE]
     if not relevant:
@@ -237,7 +283,10 @@ def search_knowledge(ctx: ToolContext, query: str, top_k: int = 4) -> ToolOutcom
 _NOTE_SYSTEM = """You draft an inspection approval note as JSON for human review.
 Use ONLY facts from the inspection document. Rules:
 - ref_no and date: write empty strings; the system fills them.
-- findings: one per defect found; severity is low, medium, high or critical;
+- findings: one per row of the report's findings table, in the same order; do not merge or split rows.
+  item: the row's item text. observation: the row's observation with its numbers.
+  severity: copy it EXACTLY as written in that row's Severity column (low, medium, high or critical);
+  never raise or lower it. Only if the report states no severity, judge it yourself.
   source_page is the page number (from the '--- Page N ---' markers) where the finding is written.
 - sop_references: for every SOP passage below that supports a finding or the recommendation
   (for example repair criteria or severity rules), cite it exactly as written in its [brackets],
@@ -270,6 +319,38 @@ def _check_sop_references(ctx: ToolContext, note: ApprovalNote, hits: list[KBHit
     return kept
 
 
+def check_against_report(ctx: ToolContext, note: ApprovalNote, text: str) -> None:
+    """
+    The report states each finding's item and severity; the model must not change them. For every
+    finding that matches a row of the report's findings table: use the row's severity (warn on change)
+    and the row's item text (so the Word table is tidy; the model's observation is kept).
+    Also warn about report rows that no finding refers to.
+    """
+    rows = findings.parse_finding_rows(text)
+    if not rows:
+        return
+    used: set[int] = set()
+    for finding in note.findings:
+        row = findings.match_row(finding.item, rows) or findings.match_row(finding.observation, rows)
+        if row is None:
+            continue
+        used.add(id(row))
+        if row.severity != finding.severity:
+            ctx.warn(f"Finding {finding.item!r}: model said {finding.severity.value}, the report says "
+                     f"{row.severity.value}; using the report's severity.")
+            finding.severity = row.severity
+        finding.item = findings.row_item(row, finding.observation) or finding.item
+    for row in rows:
+        if id(row) not in used:
+            ctx.warn(f"Report finding not in the note: {_one_line(row.text, 80)!r} ({row.severity.value}).")
+
+
+def _check_cost(ctx: ToolContext, note: ApprovalNote, source_text: str) -> None:
+    if note.cost_implication and office.cost_text(note.cost_implication, source_text) == office.COST_PLACEHOLDER:
+        ctx.warn(f"Cost {_one_line(note.cost_implication, 160)!r} has an amount that is not in the report; "
+                 f"replaced with {office.COST_PLACEHOLDER!r}.")
+
+
 def _check_source_pages(ctx: ToolContext, note: ApprovalNote, doc: DocEntry) -> None:
     valid = doc.page_numbers()
     for finding in note.findings:
@@ -292,7 +373,10 @@ def draft_approval_note(ctx: ToolContext, doc_id: str, kb_ref_ids: Optional[list
         {"role": "user", "content": f"Inspection document ({doc.filename}):\n{doc.full_text()[:DOC_PROMPT_MAX_CHARS]}"
                                     f"\n\nSOP passages you may cite:\n{sop_text}"},
     ]
-    note: ApprovalNote = _llm_json(ctx, ApprovalNote, messages, "draft_approval_note")
+    note: ApprovalNote = _llm_json(ctx, ApprovalNote, messages, "draft_approval_note", options=NOTE_OPTIONS,
+                                   timeout_s=max(NOTE_TIMEOUT_S, settings.WB_LLM_TIMEOUT_S))
+    check_against_report(ctx, note, doc.full_text())
+    _check_cost(ctx, note, doc.full_text())
     note.sop_references = _check_sop_references(ctx, note, hits)
     sop_auto = False
     if hits and not note.sop_references:
@@ -477,7 +561,9 @@ TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
              "Search the offline SOP / manual knowledge base. Returns kb ids (kb_1, ...) with file name, "
              "page and a snippet. Only relevant passages are returned.",
              _schema({"query": {"type": "string", "description": "what to look for, in plain words"},
-                      "top_k": {"type": "integer", "description": "how many passages (1-10, default 4)"}},
+                      "top_k": {"type": "integer", "description": "how many passages (1-10, default 4)"},
+                      "queries": {"type": "array", "items": {"type": "string"},
+                                  "description": "optional extra queries, e.g. one per finding; results are merged"}},
                      ["query"]),
              search_knowledge),
     ToolSpec("draft_approval_note",

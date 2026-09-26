@@ -75,6 +75,14 @@ MIN_TEXT_LAYER_CHARS = 20
 OCR_MIN_MEAN_CONFIDENCE = 60.0
 OCR_MIN_WORD_COUNT = 3
 
+# Tesseract page segmentation for document pages. psm 4 ("single column of
+# variable-size text") reads a table row by row: the inspection reports'
+# findings rows come out as "item  observation  severity" on one line. The
+# default (psm 3) read report 1's findings table column by column, so no
+# finding could be paired with its severity. Lines are kept (not joined with
+# spaces) so callers can see the table structure.
+OCR_PAGE_CONFIG = "--psm 4"
+
 # P&ID tiling: a 2x2 grid with ~15% overlap between neighbouring tiles on
 # each axis, so a tag straddling the midline isn't split across two tiles.
 PID_TILE_OVERLAP = 0.15
@@ -112,7 +120,8 @@ PID_PROMPT_EXAMPLES = ("P-101", "V-201", "FT-301")
 # Bump if the cached JSON shape or the extraction pipeline changes in a way
 # that makes old cached results wrong. 2 = deskew before OCR (A8c).
 # 3 = P&ID OCR fast path + one vision confirm call (A10).
-_CACHE_VERSION = 3
+# 4 = page OCR with psm 4 and line breaks kept (Scenario A quality fix).
+_CACHE_VERSION = 4
 
 
 class DocumentExtractionError(Exception):
@@ -208,17 +217,24 @@ def _configure_tesseract() -> None:
 
 
 def _ocr_page(image: Image.Image) -> tuple[str, float, int]:
-    """Returns (text, mean_word_confidence, word_count)."""
+    """Returns (text with one OCR line per text line, mean_word_confidence, word_count)."""
     _configure_tesseract()
-    data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+    data = pytesseract.image_to_data(image, config=OCR_PAGE_CONFIG, output_type=pytesseract.Output.DICT)
 
-    words: list[str] = []
+    lines: list[list[str]] = []
     confidences: list[float] = []
-    for raw_text, raw_conf in zip(data["text"], data["conf"]):
+    current_line = None
+    word_count = 0
+    for index, (raw_text, raw_conf) in enumerate(zip(data["text"], data["conf"])):
         text = raw_text.strip()
         if not text:
             continue
-        words.append(text)
+        line_key = (data["block_num"][index], data["par_num"][index], data["line_num"][index])
+        if line_key != current_line:
+            lines.append([])
+            current_line = line_key
+        lines[-1].append(text)
+        word_count += 1
         try:
             conf_value = float(raw_conf)
         except (TypeError, ValueError):
@@ -227,7 +243,7 @@ def _ocr_page(image: Image.Image) -> tuple[str, float, int]:
             confidences.append(conf_value)
 
     mean_confidence = sum(confidences) / len(confidences) if confidences else 0.0
-    return " ".join(words), mean_confidence, len(words)
+    return "\n".join(" ".join(words) for words in lines), mean_confidence, word_count
 
 
 def _ink_mask(image: Image.Image) -> Image.Image:

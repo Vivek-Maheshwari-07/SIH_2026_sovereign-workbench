@@ -96,7 +96,9 @@ def test_task_created_and_finished_are_audited(fails):
         _wait_done(store, state.task_id)
     finally:
         store.stop()
-    records = sorted(read_audit_records(task_id=state.task_id), key=lambda r: r.ts)
+    # read_audit_records is newest first; reverse before the stable sort so equal timestamps (Windows
+    # clock ticks ~15 ms, a fast task can finish in the same tick) keep the order they were written in.
+    records = sorted(reversed(read_audit_records(task_id=state.task_id)), key=lambda r: r.ts)
     assert [r.name for r in records] == ["task_created", "task_finished"]
     finished = records[1]
     assert finished.kind == "system" and finished.ok is (not fails)

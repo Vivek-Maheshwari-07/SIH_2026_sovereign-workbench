@@ -79,6 +79,7 @@ _ARTIFACT_ID_RE = re.compile(r"^a_[0-9a-f]{12}$")
 # XML 1.0 forbids C0 controls except tab/newline/carriage return, plus lone surrogates and U+FFFE/U+FFFF.
 _ILLEGAL_XML_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff￾￿]")
 _NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+_NUMBER_SPACE_RE = re.compile(r"(?<=\d)[ \t]*,[ \t]*(?=\d)")  # "90, 000" / "40 ,000": digit on both sides
 _PLACEHOLDER_RE = re.compile(r"\{\{(?:ref_no|date|subject|background|recommendation|cost_implication|"
                              r"prepared_by|sop_note|finding\.\w+|sop\.\w+)\}\}")
 _SOP_PAGE_RE = re.compile(r"^(?P<doc>.*?)[\s,;:\-]*(?:p\.|pp\.|pg\.?|page)\s*(?P<page>\d+)\s*\.?$", re.IGNORECASE)
@@ -338,19 +339,28 @@ def _normalize_number(number: str) -> str:
     return plain
 
 
+def join_number_spaces(text: str) -> str:
+    """
+    Remove spaces around a digit-group separator inside a number, only when there is a digit on
+    both sides: OCR writes "Rs 90, 000" and "Rs 40 ,000" for "Rs 90,000" and "Rs 40,000".
+    """
+    return _NUMBER_SPACE_RE.sub(",", text or "")
+
+
 def cost_text(cost: Optional[str], source_text: Optional[str]) -> str:
     """
     Keep cost_implication only if every number in it appears in the source
     document text; the model must never invent money amounts. Text with no
-    numbers (e.g. "Within the approved maintenance budget") is kept.
+    numbers (e.g. "Within the approved maintenance budget") is kept. OCR spaces
+    inside numbers are removed from both texts before comparing (join_number_spaces).
     """
-    text = clean_text(cost, MAX_PARAGRAPH_CHARS).strip()
+    text = join_number_spaces(clean_text(cost, MAX_PARAGRAPH_CHARS)).strip()
     if not text:
         return COST_PLACEHOLDER
     numbers = [_normalize_number(n) for n in _NUMBER_RE.findall(text)]
     if not numbers:
         return text
-    source_numbers = {_normalize_number(n) for n in _NUMBER_RE.findall(source_text or "")}
+    source_numbers = {_normalize_number(n) for n in _NUMBER_RE.findall(join_number_spaces(source_text or ""))}
     if all(n in source_numbers for n in numbers):
         return text
     return COST_PLACEHOLDER

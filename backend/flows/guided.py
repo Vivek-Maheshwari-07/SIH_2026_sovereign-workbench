@@ -19,12 +19,13 @@ from typing import Any, Optional, Protocol
 
 from backend.agent_tools import ToolContext, ToolOutcome, execute_tool
 from backend.file_store import file_store
-from backend.tools import office
+from backend.tools import findings, office
 from shared.contracts import ArtifactKind, EventType, PlanStep, RouteDecision, Scenario, TaskType
 
 # ---- named constants (no .env key exists for these)
 SEARCH_QUERY_MAX_CHARS = 240
-MAX_KB_REFS = 3
+MAX_KB_REFS = 3                     # SOP passages given to draft_approval_note (each adds ~35 s of prompt on CPU)
+KB_TOP_K = 4                        # hits per KB query
 FINAL_STEPS_MAX_CHARS = 1200
 FINDING_WORDS = ("thickness", "thinning", "corrosion", "pitting", "crack", "leak", "weep", "defect",
                  "damage", "dent", "erosion", "rust")
@@ -113,6 +114,19 @@ def search_query_from_text(text: str) -> str:
     return query[:SEARCH_QUERY_MAX_CHARS].strip() or "inspection repair criteria"
 
 
+def pick_kb_refs(ctx: ToolContext, kb_ids: list[str], limit: int = MAX_KB_REFS) -> list[str]:
+    """Best-scoring passages first (kb_ids come sorted by score), one per SOP file before any second one."""
+    picked: list[str] = []
+    sources: set[str] = set()
+    for kb_id in kb_ids:
+        source = ctx.scratchpad.kb_hits[kb_id].source
+        if source not in sources and len(picked) < limit:
+            picked.append(kb_id)
+            sources.add(source)
+    picked += [k for k in kb_ids if k not in picked][:limit - len(picked)]
+    return picked
+
+
 # ------------------------------------------------------------------ running
 def _step(runner: Runner, tool: str, args: dict[str, Any]) -> ToolOutcome:
     runner.checkpoint()
@@ -139,8 +153,9 @@ def _scenario_a(runner: Runner, file_ids: list[str]) -> str:
     doc_id = list(runner.ctx.scratchpad.docs)[-1]
     doc = runner.ctx.scratchpad.docs[doc_id]
     before = set(runner.ctx.scratchpad.kb_hits)
-    _step(runner, "search_knowledge", {"query": search_query_from_text(doc.full_text()), "top_k": 4})
-    kb_ids = [k for k in runner.ctx.scratchpad.kb_hits if k not in before][:MAX_KB_REFS]
+    queries = findings.kb_queries(doc.full_text()) or [search_query_from_text(doc.full_text())]
+    _step(runner, "search_knowledge", {"query": queries[0], "queries": queries[1:], "top_k": KB_TOP_K})
+    kb_ids = pick_kb_refs(runner.ctx, [k for k in runner.ctx.scratchpad.kb_hits if k not in before])
     outcome = _step(runner, "draft_approval_note", {"doc_id": doc_id, "kb_ref_ids": kb_ids})
     note = list(runner.ctx.scratchpad.notes.values())[-1]
     high = sum(f.severity.value in ("high", "critical") for f in note.findings)

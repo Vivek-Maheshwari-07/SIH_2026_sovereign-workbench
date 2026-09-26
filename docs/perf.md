@@ -1,8 +1,9 @@
 # Performance (ticket A10)
 
 Goal: every guided scenario under 5 minutes on the demo laptop, same accuracy.
-Result: **met**. Worst measured guided run is now 158 s (Scenario A, cold); Scenario C went
-from 372 s to 72 s cold with 12/12 tags.
+Result: **met**. Scenario C went from 372 s to 72 s cold with 12/12 tags. After the Scenario A
+quality fix (section below), the worst measured guided run is Scenario A cold at 231 s. That run now
+cites SOPs, keeps the report's severities and shows the cost.
 
 Measured 2026-09-26 through the real API (upload -> POST /api/tasks -> poll events).
 The document-extraction cache (`WB_CACHE_DIR`) was emptied before every run, so every run
@@ -30,6 +31,7 @@ bge-m3 3.3 s. With all three in RAM Ollama uses ~6.7 GB.
 | Scenario | Before cold | Before warm | After cold | After warm | After, with prewarm* |
 |---|---|---|---|---|---|
 | A inspection note | 170 s | 106 s | 158 s | 100 s | 130 s |
+| A after the quality fix (report 1 / report 2) | | | 231 / 225 s | 108-110 / 100-139 s | 214 / 210 s |
 | B code calc | 77 s | 51 s | 96 s | 54 s | 70 s |
 | C P&ID tags | **372 s** | 157 s | **72 s** | 14 s** | 64 s |
 
@@ -48,7 +50,7 @@ for the same request.
 
 | Scenario | Time | Result |
 |---|---|---|
-| A inspection note | 217 s | succeeded, approval note .docx |
+| A inspection note | 217 s | succeeded, approval note .docx (measured before the Scenario A quality fix; not re-measured, see docs/known_issues.md) |
 | B code calc | 194 s | succeeded, 3 tests passed, t = 7.246 mm |
 | C P&ID tags | 155 s | succeeded, 12/12 tags (fast path) |
 
@@ -160,18 +162,76 @@ default applies and all three stayed loaded (checked with `ollama ps`: no swap a
 
 | Item | Measurement | Decision |
 |---|---|---|
-| Scenario A prompt size | 2,878 chars of OCR text, 1,058 prompt tokens, 37.5 s to process (0.3 s when cached); generating ~500 tokens at 5.4 tok/s takes 85-90 s | Not trimmed: prompt is small, generation dominates. With 3 SOP passages cited the prompt is 2,255 tokens and the call ~200 s: still inside 5 min. |
+| Scenario A prompt size | A10: 1,058 prompt tokens (no SOP passages), 37.5 s to process (0.3 s when cached); generating ~500 tokens at 5.4 tok/s takes 85-90 s. After the quality fix: 2,250-2,530 tokens with 3 SOP passages, 84-102 s to process | Not trimmed. Cutting each SOP passage to 900 chars saved 30-40 s but report 2's note then lost the Insulation cladding finding, so full passages are kept. |
 | `WB_NUM_CTX` 8192 vs 4096 | Same speed (5.4-5.6 tok/s); switching num_ctx forces a 7.8 s reload | Kept 8192 (A with SOP passages needs the room). |
 | `keep_alive` | Ollama default is 5 min, so a prewarm done more than 5 min before the demo was lost | **Changed**: all calls send `keep_alive="30m"` (`llm_client.OLLAMA_KEEP_ALIVE`). Saves a reload (up to ~10 s per model) after idle gaps. Replaying Scenario A's exact prompt 3x with and 3x without it gave the same kind of results. |
 
-## Known issues seen while measuring (not caused by A10)
+## Scenario A quality fix (after A10)
 
-- **Scenario A cites 0 SOPs** on `scenario_a_report_1.pdf`, before and after. The guided KB query
-  is built from OCR text where the report header is glued to the first sentence. Best KB score is
-  0.566, just under `MIN_KB_SCORE` 0.57. Separate ticket; it is a quality issue, not speed.
-- **Scenario A severities vary between runs** (temperature 0.2, no seed). Bottom plate near sump
-  came out High in the 2 before-runs but Medium in all 10 later runs (4 API runs + 6 prompt
-  replays, 3 of them without `keep_alive`, i.e. identical to the old code), so this is the model,
-  not A10. Findings sometimes merge (4 instead of 5).
-  Worth a separate look (fixed seed, or severity rules in the prompt).
-- Cost `Rs 4,50,000` was not in the drafted note in any run, before or after.
+A10 left three Scenario A problems: 0 SOPs cited, unstable severities, and the cost always
+replaced by "To be filled by the originator." All three are fixed. Measured 2026-09-26 on
+`demo/inputs/scenario_a_report_1.pdf` and `scenario_a_report_2.pdf`, guided mode.
+
+### What changed
+
+| Change | Why |
+|---|---|
+| Page OCR uses Tesseract `--psm 4` and keeps line breaks (`documents.OCR_PAGE_CONFIG`) | The default psm 3 read report 1's findings table column by column (all items, then all observations, then "High High Medium Medium Low"), and all words were joined into one line. psm 4 reads each table row as "item  observation  severity". Same speed (~4 s per page). Cache version 4. |
+| Findings table parser (`backend/tools/findings.py`) | A row starts on a line that ends with a severity word; misread row numbers ("+14\"", "oS") are dropped. Both reports: 5/5 rows with the right severity. |
+| KB search: one query per finding row + one per recommendation sentence, hits merged, only >= `MIN_KB_SCORE` 0.57 (unchanged), up to 3 passages, one per SOP file first | The finding descriptions alone score 0.45-0.60 (report 2: none above 0.565). The recommended actions ("hot work permit with gas test", "H2S monitoring and breathing apparatus") score 0.58-0.74. The queries and best scores are shown as a log event. |
+| Prompt: one finding per table row, severity copied exactly; draft call at temperature 0, seed 42 (`NOTE_TEMPERATURE`, `NOTE_SEED`) | The same input now gives the same note. |
+| Code check after the model answers (`agent_tools.check_against_report`) | Each finding is matched to its report row (60% of item words). If the severity differs, the report's is used and a warning is logged. The item text is replaced by the row's item column (first line up to the observation, plus at most 2 words from the wrapped line, cleaned), and the model's observation is kept. Report rows missing from the note are warned about. |
+| Cost check joins OCR spaces inside numbers (`office.join_number_spaces`, digit on both sides) in both texts | Report 1 page 2 OCRs as "Rs 90, 000" and "Rs 40 ,000". The model's "Rs 90,000" was then "not in the source" and the whole cost line was blanked. Invented amounts are still replaced. |
+| Draft call timeout 420 s (`NOTE_TIMEOUT_S`, never below `WB_LLM_TIMEOUT_S`) | With 3 SOP passages a first (uncached) draft takes 203-215 s, over `WB_LLM_TIMEOUT_S` 180 s. The call timed out, and the retry finished in ~105 s from Ollama's prompt cache. That wasted 180 s per run: cold runs took 296-300 s. With the longer timeout: 225-231 s. Other LLM calls keep 180 s. |
+
+### Timing (guided, Scenario A)
+
+| | Report 1 | Report 2 |
+|---|---|---|
+| Cold (models unloaded, new file) | 231 s | 225 s |
+| After prewarm (new file) | 214 s | 210 s |
+| Warm, same file again (Ollama prompt cache) | 108-110 s | 100-139 s |
+| Cold, before the 420 s timeout (first attempt timed out) | 300 s | 296 s |
+
+Step breakdown, cold, report 1: read_document 6.2 s (3%), search_knowledge 11 queries incl.
+bge-m3 load 10.8 s (5%), draft_approval_note LLM 213.8 s (92%; 12.6 s load, ~2,250 prompt tokens
+in ~85 s, ~595 tokens out in ~110 s), Word 0.5 s.
+
+### 3 runs per report (slow test, starting with no models loaded)
+
+`tests/track_a/test_scenario_a_quality.py::test_live_scenario_a_is_correct_and_stable`
+
+| Run | Report 1 | Report 2 |
+|---|---|---|
+| 1 | 219 s | 194 s |
+| 2 | 110 s | 100 s |
+| 3 | 108 s | 139 s |
+
+All 6 runs were identical in content. The item text below is what the Word table shows after the
+item fix (items taken from the report row). That fix was checked with one more live run per report
+(120 s and 113 s, same findings, severities, cost and SOPs):
+
+| Report | Findings (item: severity, all = report) | Cost | SOPs cited |
+|---|---|---|---|
+| 1 | Shell course 2, north side: High; Bottom plate near sump: High; Inlet nozzle N2 and mixer MX-104: Medium; Confined space entry permit: Medium; Roof handrail and stairway: Low | Rs 4,50,000 | nsw_hot_work_petroleum.pdf p.81; osha_confined_space.pdf p.12; osha_h2s_quickcard.pdf p.1 |
+| 2 | CML-03 elbow at P-101A discharge: High; Flange FL-3 near CML-04: High; CML-04 dead leglow point (OCR glue): Medium; CML-05 at support PS-12: Medium; Insulation cladding: Low | Rs 2,85,000 | nsw_hot_work_petroleum.pdf p.73 and p.27; osha_h2s_fact_sheet.pdf p.2 |
+
+The model itself cites none of the passages. The existing fallback cites the retrieved ones and
+the Word note labels them as added automatically. Report 2 never cites osha_confined_space.pdf
+(no entry is made).
+
+### KB queries that pass 0.57
+
+| Report | Query (shortened) | Best hit | Score |
+|---|---|---|---|
+| 1 | Finding: Confined space entry, no gas test entries... | osha_confined_space.pdf p.12 | 0.595 |
+| 1 | Welding must be done under a hot work permit... | nsw_hot_work_petroleum.pdf p.81 | 0.704 |
+| 1 | Remove all sludge... H2S monitoring and breathing apparatus | osha_h2s_quickcard.pdf p.1 | 0.651 |
+| 1 | Fit a spade blind... apply lockout/tagout... | nsw_hot_work_petroleum.pdf p.40 | 0.577 |
+| 1 | Brief all entrants... confined space entry procedure. | osha_confined_space.pdf p.12 | 0.685 |
+| 2 | Before cutting, isolate the line, lock and tag... | nsw_hot_work_petroleum.pdf p.101 | 0.583 |
+| 2 | Cutting and welding only under a hot work permit... | nsw_hot_work_petroleum.pdf p.73 | 0.735 |
+| 2 | Work on FL-3 needs H2S monitoring and breathing apparatus. | osha_h2s_fact_sheet.pdf p.2 | 0.607 |
+
+All other queries (the other finding rows and recommendation sentences) score 0.44-0.57 and are
+dropped. Open points are in `docs/known_issues.md`.

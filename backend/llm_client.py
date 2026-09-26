@@ -56,8 +56,8 @@ def _resolve(path: Path) -> Path:
     return path if path.is_absolute() else _REPO_ROOT / path
 
 
-def _client() -> ollama.Client:
-    return ollama.Client(host=settings.OLLAMA_HOST, timeout=settings.WB_LLM_TIMEOUT_S)
+def _client(timeout_s: Optional[float] = None) -> ollama.Client:
+    return ollama.Client(host=settings.OLLAMA_HOST, timeout=timeout_s or settings.WB_LLM_TIMEOUT_S)
 
 
 def _options() -> dict[str, Any]:
@@ -230,9 +230,11 @@ def chat_json(
     schema: type[BaseModel],
     *,
     purpose: str = "chat_json",
+    options: Optional[dict[str, Any]] = None,
+    timeout_s: Optional[float] = None,
 ) -> BaseModel:
     """Like chat_json_meta() but returns only the validated model."""
-    return chat_json_meta(model_id, messages, schema, purpose=purpose).value
+    return chat_json_meta(model_id, messages, schema, purpose=purpose, options=options, timeout_s=timeout_s).value
 
 
 def chat_json_meta(
@@ -241,15 +243,20 @@ def chat_json_meta(
     schema: type[BaseModel],
     *,
     purpose: str = "chat_json",
+    options: Optional[dict[str, Any]] = None,
+    timeout_s: Optional[float] = None,
 ) -> JsonResult:
     """
     Like chat(), but forces the reply into `schema`'s JSON schema (via
     Ollama's `format` parameter) and validates it with the Pydantic model.
     On a validation failure, the error is fed back to the model once for a
     single retry; a second failure raises LLMError(BAD_MODEL_OUTPUT).
+    `options` override the default Ollama options for this call only (e.g. temperature, seed);
+    `timeout_s` replaces WB_LLM_TIMEOUT_S for this call only (a call known to need longer).
     """
     conversation = [dict(m) for m in messages]
-    client = _client()
+    call_options = {**_options(), **(options or {})}
+    client = _client(timeout_s) if timeout_s else _client()
     json_schema = schema.model_json_schema()
 
     def _do_call():
@@ -258,7 +265,7 @@ def chat_json_meta(
             messages=conversation,
             format=json_schema,
             think=settings.WB_THINK,
-            options=_options(),
+            options=call_options,
             keep_alive=OLLAMA_KEEP_ALIVE,
         )
 

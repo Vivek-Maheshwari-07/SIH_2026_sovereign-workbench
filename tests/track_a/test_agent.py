@@ -157,7 +157,7 @@ def report_file_id(tmp_path) -> str:
 
 
 def use_fake(monkeypatch, fake: FakeOllama) -> FakeOllama:
-    monkeypatch.setattr(llm_client, "_client", lambda: fake)
+    monkeypatch.setattr(llm_client, "_client", lambda timeout_s=None: fake)
     return fake
 
 
@@ -730,16 +730,19 @@ def test_call_key_ignores_argument_order():
 
 
 def test_time_budget_switches_to_guided(monkeypatch, store, report_file_id):
-    monkeypatch.setattr(settings, "WB_AGENT_TIMEOUT_S", 1.0)
+    # Agent steps take 1.05 s each; the switch point is 0.6 * 3 s = 1.8 s, so the switch happens after the
+    # 2nd step (~2.1 s), leaving ~0.9 s for the guided flow. It needs ~0.35 s (mostly the Word render);
+    # the old 1.0 s budget left only ~0.3 s and failed under load.
+    monkeypatch.setattr(settings, "WB_AGENT_TIMEOUT_S", 3.0)
     use_fake(monkeypatch, FakeOllama([("tool", "search_knowledge", {"query": "slow"}),
                                       ("tool", "search_knowledge", {"query": "slower"}),
                                       ("tool", "search_knowledge", {"query": "slowest"})],
                                      {"_Plan": [plan_json("finish")], "ApprovalNote": [note_json()]},
-                                     step_delay_s=0.35))
+                                     step_delay_s=1.05))
     state, events = run_task(store, "Draft approval note", [report_file_id])
     assert state.status == TaskStatus.SUCCEEDED, state.error
     assert agent.TIME_SWITCH_MESSAGE in _warns(events)
-    assert state.artifacts[0].kind == "docx" and state.elapsed_s < 1.0
+    assert state.artifacts[0].kind == "docx" and state.elapsed_s < 3.0
     assert [p.tool for p in state.plan] == ["read_document", "search_knowledge", "draft_approval_note", "finish"]
 
 
