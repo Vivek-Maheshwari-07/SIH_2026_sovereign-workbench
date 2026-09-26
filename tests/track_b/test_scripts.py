@@ -64,10 +64,11 @@ ALL_TAGS = ["T-201", "LT-201", "XV-201", "P-201A", "P-201B", "PT-202", "FT-201",
             "PSV-201", "LT-202"]
 
 
-# Types as the backend writes them (it uses "Instrument" for all transmitters).
-GOOD_TYPES = {"T-201": "Tank", "LT-201": "Instrument", "XV-201": "Valve", "P-201A": "Pump", "P-201B": "Pump",
-              "PT-202": "Instrument", "FT-201": "Instrument", "E-201": "Heat exchanger", "TT-203": "Instrument",
-              "V-201": "Vessel", "PSV-201": "Pressure safety valve", "LT-202": "Instrument"}
+# Types as the backend writes them (specific instrument types since the A fix).
+GOOD_TYPES = {"T-201": "Tank", "LT-201": "Level transmitter", "XV-201": "Shutdown valve", "P-201A": "Pump",
+              "P-201B": "Pump", "PT-202": "Pressure transmitter", "FT-201": "Flow transmitter",
+              "E-201": "Heat exchanger", "TT-203": "Temperature transmitter", "V-201": "Vessel",
+              "PSV-201": "Pressure safety valve", "LT-202": "Level transmitter"}
 
 
 def tag_list(tags, types=None, with_type_column=True) -> bytes:
@@ -78,7 +79,7 @@ def tag_list(tags, types=None, with_type_column=True) -> bytes:
     types = {**GOOD_TYPES, **(types or {})}
     data = {"Tag": list(tags)}
     if with_type_column:
-        data["Equipment type"] = [types.get(t.replace(" ", "-"), "Instrument") for t in tags]
+        data["Equipment type"] = [types.get(t.replace(" ", "-"), "Other") for t in tags]
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
         pd.DataFrame(data).to_excel(xw, sheet_name="Tags", index=False)
@@ -281,6 +282,16 @@ def test_wrong_equipment_type_fails_and_names_the_tag():
     assert "P-201A expected Pump, found Tank" in check.detail
 
 
+def test_instrument_kind_must_match():
+    wrong = c_checks(tag_list(ALL_TAGS, {"LT-201": "Pressure transmitter"}))["C: equipment types"]
+    assert not wrong.ok and wrong.detail == ("wrong type: LT-201 expected Level transmitter (on T-201), "
+                                             "found Pressure transmitter")
+    generic = c_checks(tag_list(ALL_TAGS, {"FT-201": "Instrument"}))["C: equipment types"]
+    assert not generic.ok and "FT-201 expected Flow transmitter (discharge header), found Instrument" in generic.detail
+    same_kind = c_checks(tag_list(ALL_TAGS, {"LT-202": "Level indicator", "TT-203": "Temperature gauge"}))
+    assert same_kind["C: equipment types"].ok                                   # same measured variable
+
+
 def test_missing_type_column_fails():
     check = c_checks(tag_list(ALL_TAGS, with_type_column=False))["C: equipment types"]
     assert not check.ok and "T-201 expected Tank (crude storage), found no type" in check.detail
@@ -298,7 +309,12 @@ def test_wrong_type_fails_the_whole_run(tmp_path):
 def test_equipment_class_rule():
     cls = e2e_run.equipment_class
     assert cls("Tank (crude storage)") == cls("Storage tank") == "tank"
-    assert cls("Pressure transmitter (pump discharge)") == "instrument"        # bracket text ignored
+    assert cls("Pressure transmitter (pump discharge)") == "pressure instrument"   # bracket text ignored
+    assert cls("Level transmitter (on T-201)") == cls("Level indicator") == cls("LEVEL GAUGE") == "level instrument"
+    assert cls("Flow transmitter") == cls("Flow indicating controller") == "flow instrument"
+    assert cls("Temperature transmitter") == cls("Temp element") == "temperature instrument"
+    assert cls("Differential pressure flow transmitter") == "flow instrument"   # measures flow
+    assert cls("Instrument") == "instrument"                                   # kind unknown
     assert cls("Pressure safety valve (on V-201, to flare)") == cls("Control valve") == "valve"
     assert cls("Vessel") != cls("Valve")
     assert cls("Agitator") == "agitator"                                      # unknown: own words only

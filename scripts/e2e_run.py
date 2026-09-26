@@ -14,7 +14,8 @@ artifacts (all non-empty), plus:
   B (code calc):       the printed result t = 7.246 mm in the final answer;
   C (P&ID tags):       all expected tags in the .xlsx (12/12), no invented tags (any tag outside the
                        expected list fails) and the right equipment type for every tag, as
-                       expected.md says. Types are compared by equipment class (see equipment_class).
+                       expected.md says. Types are compared by equipment class, instruments also
+                       by what they measure (see equipment_class).
 NET-001 (core external connections since backend start) is read before and after.
 Writes docs/soak/<date_time>/report.md + raw.json (+ the artifacts). Exit code 0 only if every
 run passed. Ctrl+C cancels the running task, stops cleanly and still writes the report so far.
@@ -149,17 +150,31 @@ EQUIPMENT_CLASSES: list[tuple[str, tuple[str, ...]]] = [
     ("tank", ("tank",)),
     ("vessel", ("vessel", "separator", "drum", "column", "reactor")),
 ]
+# Instruments are split by what they measure. First match wins: flow, level and temperature come
+# before pressure because a differential-pressure transmitter usually measures flow or level.
+INSTRUMENT_KINDS: list[tuple[str, tuple[str, ...]]] = [
+    ("flow", ("flow",)),
+    ("level", ("level",)),
+    ("temperature", ("temperature", "temp")),
+    ("pressure", ("pressure",)),
+]
 
 
 def equipment_class(kind: str) -> str:
     """Loose type key: lower case, text in brackets dropped, then the equipment class by keyword.
-    "Tank (crude storage)" / "Storage tank" -> "tank"; "Level transmitter" / "Instrument" ->
-    "instrument"; "Shutdown (on/off) valve, actuated" / "On/off valve" -> "valve". A type with no
+    "Tank (crude storage)" / "Storage tank" -> "tank"; "Shutdown (on/off) valve, actuated" /
+    "On/off valve" -> "valve". Instruments are split by what they measure: "Level transmitter" /
+    "Level indicator" -> "level instrument", "Pressure transmitter" -> "pressure instrument"; a bare
+    "Instrument" -> "instrument" (kind unknown), which matches no expected instrument. A type with no
     class keyword falls back to its own cleaned text, so it only matches the same words."""
     text = re.sub(r"\([^)]*\)", " ", str(kind).lower())
     text = re.sub(r"[^a-z/ ]+", " ", text)
     for name, words in EQUIPMENT_CLASSES:
         if any(re.search(rf"\b{w}", text) for w in words):
+            if name == "instrument":
+                measured = next((k for k, keys in INSTRUMENT_KINDS if any(re.search(rf"\b{w}", text) for w in keys)),
+                                None)
+                return f"{measured} instrument" if measured else "instrument"
             return name
     return " ".join(text.split())
 
