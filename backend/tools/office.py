@@ -57,6 +57,7 @@ DATE_FORMAT = "%d-%m-%Y"
 DRAFT_FOOTER = "DRAFT - AI-generated with Sovereign AI Workbench (offline). Requires human review before approval."
 NOT_APPLICABLE = "Not applicable"
 COST_PLACEHOLDER = "To be filled by the originator."
+SOP_AUTO_NOTE = "References retrieved automatically by knowledge-base search; please verify."
 MAX_CELL_CHARS = 4000            # table / Excel cells / bullets
 MAX_PARAGRAPH_CHARS = 10000      # Word body paragraphs
 PREVIEW_CHARS = 500              # Artifact.preview limit in the contract
@@ -79,7 +80,7 @@ _ARTIFACT_ID_RE = re.compile(r"^a_[0-9a-f]{12}$")
 _ILLEGAL_XML_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff￾￿]")
 _NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 _PLACEHOLDER_RE = re.compile(r"\{\{(?:ref_no|date|subject|background|recommendation|cost_implication|"
-                             r"prepared_by|finding\.\w+|sop\.\w+)\}\}")
+                             r"prepared_by|sop_note|finding\.\w+|sop\.\w+)\}\}")
 _SOP_PAGE_RE = re.compile(r"^(?P<doc>.*?)[\s,;:\-]*(?:p\.|pp\.|pg\.?|page)\s*(?P<page>\d+)\s*\.?$", re.IGNORECASE)
 
 _ref_lock = threading.Lock()
@@ -309,6 +310,17 @@ def _fill_rows(table, rows: list[list[str]], fills: Optional[list[Optional[str]]
     template_tr.getparent().remove(template_tr)
 
 
+def _set_sop_note(doc, text: str) -> None:
+    """Fill the {{sop_note}} line under the SOP table, or remove the line when there is nothing to say."""
+    for paragraph in doc.paragraphs:
+        if "{{sop_note}}" in paragraph.text:
+            if text:
+                _set_paragraph_text(paragraph, text)
+            else:
+                paragraph._p.getparent().remove(paragraph._p)
+            return
+
+
 def split_sop_reference(reference: str) -> tuple[str, str]:
     """'SOP-INSP-012, p.4' -> ('SOP-INSP-012', '4'); no page found -> (text, '-')."""
     text = clean_text(reference, MAX_CELL_CHARS).strip()
@@ -353,7 +365,8 @@ def _word_preview(note: ApprovalNote) -> str:
 
 # ------------------------------------------------------------------ make_word
 @_guard
-def make_word(note: ApprovalNote, *, task_id: str = "", source_text: Optional[str] = None) -> Artifact:
+def make_word(note: ApprovalNote, *, task_id: str = "", source_text: Optional[str] = None,
+              sop_auto: bool = False) -> Artifact:
     """
     Fill templates/approval_note.docx from `note`. ref_no and date are always
     generated here. `source_text` (the inspection report text) is used only
@@ -393,6 +406,7 @@ def make_word(note: ApprovalNote, *, task_id: str = "", source_text: Optional[st
         _fill_rows(sops, [[str(i), *split_sop_reference(r)] for i, r in enumerate(references, start=1)])
     else:
         _fill_rows(sops, [["-", NOT_APPLICABLE, "-"]])
+    _set_sop_note(doc, SOP_AUTO_NOTE if sop_auto and references else "")
 
     leftover = [p.text for p in _all_paragraphs(doc) if _PLACEHOLDER_RE.search(p.text)]
     if leftover:

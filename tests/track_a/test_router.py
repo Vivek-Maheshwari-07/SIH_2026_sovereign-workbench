@@ -36,9 +36,14 @@ def _ollama_available() -> bool:
 
 
 OLLAMA_UP = _ollama_available()
-skip_if_no_ollama = pytest.mark.skipif(
+_ollama_skip = pytest.mark.skipif(
     not OLLAMA_UP, reason="Ollama is not reachable at settings.OLLAMA_HOST"
 )
+
+
+def skip_if_no_ollama(fn):
+    """Live Ollama test: marked slow (skipped by default) and skipped when Ollama is down."""
+    return pytest.mark.slow(_ollama_skip(fn))
 
 # (message, expected task type, needs an image attached)
 # None of these may be an exact (or punctuation-only) copy of a yaml example

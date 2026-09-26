@@ -74,12 +74,13 @@ class FakeOllama:
 
     def __init__(self, steps: list, json_replies: Optional[dict[str, list[str]]] = None,
                  repeat_last: bool = False, delay_s: float = 0.0,
-                 on_step: Optional[Callable[[int], None]] = None) -> None:
+                 on_step: Optional[Callable[[int], None]] = None, step_delay_s: float = 0.0) -> None:
         self.steps = list(steps)
         self.json = {k: list(v) for k, v in (json_replies or {}).items()}
         self.repeat_last = repeat_last
         self.delay_s = delay_s
         self.on_step = on_step
+        self.step_delay_s = step_delay_s            # delay for agent turns only (not JSON calls)
         self.step_calls: list[list[dict]] = []
 
     def chat(self, **kwargs):
@@ -90,6 +91,8 @@ class FakeOllama:
             replies = self.json.get(fmt.get("title", ""), [])
             return _response(replies.pop(0) if replies else "{}")
         self.step_calls.append([dict(m) for m in kwargs["messages"]])
+        if self.step_delay_s:
+            time.sleep(self.step_delay_s)
         if self.on_step:
             self.on_step(len(self.step_calls))
         if not self.steps:
@@ -317,7 +320,9 @@ def test_step_limit(monkeypatch, store):
                                      {"_Plan": [plan_json("search_knowledge", "finish")]}, repeat_last=True))
     state, events = run_task(store, "Loop forever")
     assert state.status == TaskStatus.FAILED and state.error.code == "AGENT_STEP_LIMIT"
-    assert len([e for e in events if e.type == EventType.STEP_START]) == 3
+    # the same call 3 times: runs once, the 2 repeats are skipped but still use up steps
+    assert len([e for e in events if e.type == EventType.STEP_START]) == 1
+    assert sum("Skipped repeated call" in w for w in _warns(events)) == 2
     assert events[-1].type == EventType.ERROR and events[-1].data["error"]["code"] == "AGENT_STEP_LIMIT"
 
 
@@ -673,3 +678,114 @@ def test_plan_is_sent_as_user_turn(monkeypatch, store):
     first = fake.step_calls[0]
     assert [m["role"] for m in first] == ["system", "user", "user"]
     assert first[2]["content"].startswith("Plan:") and first[2]["content"].endswith(agent.PLAN_FOLLOW_UP)
+
+
+# ================================================================ A8b follow-ups
+def _tool_calls(events, tool):
+    return [e for e in events if e.type == EventType.TOOL_CALL and e.data["tool"] == tool]
+
+
+def test_auto_finish_when_done_and_model_starts_other_deliverable(monkeypatch, store, report_file_id):
+    steps, json_replies = happy_steps(report_file_id)
+    steps[-1] = ("tool", "extract_pid_tags", {"doc_id": "doc_1"})          # instead of finish
+    use_fake(monkeypatch, FakeOllama(steps, json_replies))
+    state, events = run_task(store, "Draft an approval note", [report_file_id])
+    assert state.status == TaskStatus.SUCCEEDED, state.error
+    assert agent.AUTO_FINISH_MESSAGE in _warns(events)
+    assert _tool_calls(events, "extract_pid_tags") == []                     # never ran
+    assert state.final_answer.startswith("Finished automatically. Files produced: INSP-")
+    assert state.final_answer.endswith("_approval_note.docx.")
+    assert events[-1].type == EventType.FINAL
+
+
+def test_auto_finish_when_done_and_model_repeats_the_deliverable_call(monkeypatch, store, report_file_id):
+    steps, json_replies = happy_steps(report_file_id)
+    steps[-1] = steps[2]                                                      # draft again, same args
+    use_fake(monkeypatch, FakeOllama(steps, json_replies))
+    state, events = run_task(store, "Draft an approval note", [report_file_id])
+    assert state.status == TaskStatus.SUCCEEDED
+    assert agent.AUTO_FINISH_MESSAGE in _warns(events)
+    assert len(_tool_calls(events, "draft_approval_note")) == 1 and len(state.artifacts) == 1
+
+
+def test_same_call_twice_is_not_run_again(monkeypatch, store):
+    fake = use_fake(monkeypatch, FakeOllama([("tool", "search_knowledge", {"query": "loto"}),
+                                             ("tool", "search_knowledge", {"query": "loto"}),
+                                             ("tool", "search_knowledge", {"query": "lockout"}),
+                                             ("tool", "finish", {"answer": "ok"})],
+                                            {"_Plan": [plan_json("search_knowledge", "finish")]}))
+    state, events = run_task(store, "What is LOTO?")
+    assert state.status == TaskStatus.SUCCEEDED
+    queries = [e.data["args"]["query"] for e in _tool_calls(events, "search_knowledge")]
+    assert queries == ["loto", "lockout"]                                     # the repeat was skipped
+    told = fake.step_calls[2][-1]["content"]
+    assert told.startswith("You already called search_knowledge with these arguments")
+    assert "kb_1: SOP-INSP-012.pdf" in told                                   # it got the earlier result back
+    assert any("Skipped repeated call" in w for w in _warns(events))
+
+
+def test_call_key_ignores_argument_order():
+    assert agent.call_key("t", {"a": 1, "b": 2}) == agent.call_key("t", {"b": 2, "a": 1})
+    assert agent.call_key("t", {"a": 1}) != agent.call_key("t", {"a": 2})
+
+
+def test_time_budget_switches_to_guided(monkeypatch, store, report_file_id):
+    monkeypatch.setattr(settings, "WB_AGENT_TIMEOUT_S", 1.0)
+    use_fake(monkeypatch, FakeOllama([("tool", "search_knowledge", {"query": "slow"}),
+                                      ("tool", "search_knowledge", {"query": "slower"}),
+                                      ("tool", "search_knowledge", {"query": "slowest"})],
+                                     {"_Plan": [plan_json("finish")], "ApprovalNote": [note_json()]},
+                                     step_delay_s=0.35))
+    state, events = run_task(store, "Draft approval note", [report_file_id])
+    assert state.status == TaskStatus.SUCCEEDED, state.error
+    assert agent.TIME_SWITCH_MESSAGE in _warns(events)
+    assert state.artifacts[0].kind == "docx" and state.elapsed_s < 1.0
+    assert [p.tool for p in state.plan] == ["read_document", "search_knowledge", "draft_approval_note", "finish"]
+
+
+def test_time_budget_does_not_switch_once_deliverable_exists(monkeypatch):
+    run = agent.AgentRun.__new__(agent.AgentRun)
+    run.started, run.scenario = time.monotonic() - 1000, Scenario.INSPECTION_NOTE
+    run.ctx = SimpleNamespace(artifacts=[SimpleNamespace(kind="docx")])
+    run.check_time_budget()                                                   # no switch: file exists
+    run.ctx = SimpleNamespace(artifacts=[])
+    with pytest.raises(agent._SwitchToGuided):
+        run.check_time_budget()
+
+
+def test_tag_types_checked_against_prefix_table():
+    warns: list[str] = []
+    ctx = agent_tools.ToolContext(task_id="t", emit=lambda *a, **k: warns.append(a[2].get("text", "")),
+                                  add_artifact=lambda a: None)
+    tags = PidTagList(tags=[
+        PidTag(tag="P-101A", equipment_type="Valve"),            # wrong -> Pump
+        PidTag(tag="t-301", equipment_type="Instrument"),        # wrong -> Tank (case-insensitive prefix)
+        PidTag(tag="FIC-101", equipment_type="Instrument"),      # generic instrument is fine
+        PidTag(tag="PT-102", equipment_type="Pressure transmitter"),
+        PidTag(tag="PSV-7", equipment_type="Relief valve"),
+        PidTag(tag="XV-201", equipment_type="Valve"),            # unknown prefix: keep the model's answer
+        PidTag(tag="E-401", equipment_type="Heat exchanger"),
+        PidTag(tag="LIC-3", equipment_type="Pump"),              # wrong -> Level indicating controller
+    ])
+    agent_tools.check_tag_types(ctx, tags)
+    assert [t.equipment_type for t in tags.tags] == [
+        "Pump", "Tank", "Instrument", "Pressure transmitter", "Relief valve", "Valve", "Heat exchanger",
+        "Level indicating controller"]
+    assert len([w for w in warns if "prefix" in w]) == 3
+    assert agent_tools.tag_prefix(" fic-101 ") == "FIC" and agent_tools.tag_prefix("101") == ""
+
+
+def test_auto_added_sop_references_are_labelled_in_word(monkeypatch, store, report_file_id):
+    steps, json_replies = happy_steps(report_file_id, note_json(sop_references=[]))
+    use_fake(monkeypatch, FakeOllama(steps, json_replies))
+    state, _ = run_task(store, "Draft note", [report_file_id])
+    paragraphs = [p.text for p in _docx_of(state).paragraphs]
+    assert office.SOP_AUTO_NOTE in paragraphs
+
+
+def test_model_cited_sop_references_have_no_auto_label(monkeypatch, store, report_file_id):
+    steps, json_replies = happy_steps(report_file_id)
+    use_fake(monkeypatch, FakeOllama(steps, json_replies))
+    state, _ = run_task(store, "Draft note", [report_file_id])
+    paragraphs = [p.text for p in _docx_of(state).paragraphs]
+    assert office.SOP_AUTO_NOTE not in paragraphs and not any("{{" in p for p in paragraphs)

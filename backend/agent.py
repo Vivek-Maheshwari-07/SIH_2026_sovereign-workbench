@@ -35,6 +35,15 @@ PLAN_FOLLOW_UP = "\n\nFollow this plan. Call the first tool now."
 GUIDED_FALLBACK = True              # agent mode: switch to the guided flow when the agent cannot finish
 FALLBACK_CODES = frozenset({"BAD_MODEL_OUTPUT", "AGENT_STEP_LIMIT"})
 FALLBACK_MESSAGE = "Agent could not finish; switched to guided flow."
+AUTO_FINISH_MESSAGE = "Agent was done but kept going; finished automatically."
+GUIDED_SWITCH_SHARE = 0.6           # past this share of WB_AGENT_TIMEOUT_S with no deliverable -> guided flow
+TIME_SWITCH_MESSAGE = "Agent used most of its time without producing the file; switched to guided flow."
+# Tools that produce a scenario's deliverable (used by the auto-finish guard).
+DELIVERABLE_TOOLS: dict[str, Scenario] = {
+    "draft_approval_note": Scenario.INSPECTION_NOTE,
+    "run_code_task": Scenario.CODE_CALC,
+    "extract_pid_tags": Scenario.PID_TAGS,
+}
 
 SYSTEM_PROMPT = """You are the Sovereign AI Workbench agent. You run fully offline on a local computer
 and help plant engineers with inspection reports, SOPs, P&ID drawings and engineering calculations.
@@ -62,6 +71,18 @@ The last step is finish. Do not add extra checking or conversion steps."""
 class _Plan(BaseModel):
     """LLM output schema for the plan (internal; the API type is shared.contracts.PlanStep)."""
     steps: list[PlanStep] = Field(min_length=1, max_length=MAX_PLAN_STEPS)
+
+
+class _SwitchToGuided(Exception):
+    """Internal: the time budget says the guided flow must take over now."""
+
+
+def call_key(name: str, args: Any) -> str:
+    """Stable identity of a tool call: same tool + same arguments -> same key."""
+    try:
+        return name + ":" + json.dumps(args, sort_keys=True, default=str)
+    except TypeError:
+        return name + ":" + repr(args)
 
 
 class AgentStop(Exception):
@@ -144,6 +165,8 @@ class AgentRun:
                                task_message=handle.message)
         self.messages: list[dict[str, Any]] = []
         self.step = 0
+        self.scenario: Optional[Scenario] = None
+        self.seen_calls: dict[str, str] = {}        # call_key -> summary of the first result
 
     # ---- stop conditions
     def checkpoint(self) -> None:
@@ -154,6 +177,20 @@ class AgentRun:
 
     def emit(self, event_type: EventType, title: str, data: dict[str, Any], step: Optional[int] = None) -> None:
         self.handle.emit(event_type, title, data, step=step)
+
+    def deliverable_ready(self) -> bool:
+        return self.scenario is not None and guided.has_expected_artifact(self.ctx.artifacts, self.scenario)
+
+    def auto_finish_answer(self) -> str:
+        files = ", ".join(a.filename for a in self.ctx.artifacts) or "none"
+        return f"Finished automatically. Files produced: {files}."
+
+    def check_time_budget(self) -> None:
+        """Switch to the guided flow while there is still time for it to finish."""
+        used = time.monotonic() - self.started
+        if (GUIDED_FALLBACK and self.scenario is not None and not self.deliverable_ready()
+                and used > GUIDED_SWITCH_SHARE * settings.WB_AGENT_TIMEOUT_S):
+            raise _SwitchToGuided()
 
     def log(self, level: str, text: str) -> None:
         self.emit(EventType.LOG, text[:80], {"level": level, "text": text}, step=self.step or None)
@@ -222,15 +259,31 @@ class AgentRun:
             self.log("warn", "Model returned an empty reply.")
             return None
 
+        assistant_turn = {"role": "assistant", "content": reply.text or "",
+                          "tool_calls": [{"function": {"name": name, "arguments": args}}]}
+        key = call_key(name, args)
+        if name != "finish":
+            other_deliverable = DELIVERABLE_TOOLS.get(name) not in (None, self.scenario)
+            if self.deliverable_ready() and (key in self.seen_calls or other_deliverable):
+                self.log("warn", AUTO_FINISH_MESSAGE)
+                return self.auto_finish_answer()
+            if key in self.seen_calls:
+                self.log("warn", f"Skipped repeated call: {name} with the same arguments was already run.")
+                self.messages.append(assistant_turn)
+                self.messages.append({"role": "tool", "tool_name": name, "content": (
+                    f"You already called {name} with these arguments. Its result was: {self.seen_calls[key]} "
+                    "Use that result, choose a different step, or call finish.")})
+                return None
+
         self.emit(EventType.STEP_START, f"Step {self.step}: {name}", {"index": self.step, "title": name},
                   step=self.step)
         outcome = execute_tool(self.ctx, name, args)
         self.checkpoint()
         if outcome.finish_answer is not None and outcome.ok:
             return outcome.finish_answer or "Done."
+        self.seen_calls[key] = outcome.summary
 
-        self.messages.append({"role": "assistant", "content": reply.text or "",
-                              "tool_calls": [{"function": {"name": name, "arguments": args}}]})
+        self.messages.append(assistant_turn)
         self.messages.append({"role": "tool", "tool_name": name, "content": outcome.summary})
         return None
 
@@ -251,6 +304,7 @@ class AgentRun:
             {"role": "user", "content": _plan_text(plan) + PLAN_FOLLOW_UP},
         ]
         while True:
+            self.check_time_budget()
             answer = self.one_step()
             if answer is not None:
                 return answer
@@ -258,6 +312,7 @@ class AgentRun:
     def run(self) -> None:
         decision = self.do_route()
         scenario = guided.pick_scenario(self.handle.scenario, decision, self.handle.file_ids)
+        self.scenario = scenario
         if self.handle.mode == TaskMode.GUIDED:
             if scenario is None:
                 raise AgentStop("BAD_REQUEST", "Guided mode needs a scenario (or an attachment that matches one).")
@@ -265,6 +320,9 @@ class AgentRun:
         else:
             try:
                 answer = self.run_agent_loop(decision)
+            except _SwitchToGuided:
+                self.log("warn", TIME_SWITCH_MESSAGE)
+                answer = self.run_guided(scenario)
             except AgentStop as stop:
                 if not (GUIDED_FALLBACK and scenario is not None and stop.code in FALLBACK_CODES):
                     raise

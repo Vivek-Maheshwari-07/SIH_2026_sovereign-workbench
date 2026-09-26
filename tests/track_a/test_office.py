@@ -382,7 +382,21 @@ def test_make_template_script_builds_template(tmp_path):
     path = module.build(tmp_path / "approval_note.docx")
     doc = Document(str(path))
     text = "\n".join(_doc_blocks(doc))
-    for placeholder in ("{{ref_no}}", "{{subject}}", "{{finding.severity}}", "{{sop.page}}", "{{cost_implication}}"):
+    for placeholder in ("{{ref_no}}", "{{subject}}", "{{finding.severity}}", "{{sop.page}}", "{{sop_note}}",
+                        "{{cost_implication}}"):
         assert placeholder in text
     assert not doc.inline_shapes                                   # no logos or images
     assert DRAFT_FOOTER in doc.sections[0].footer.paragraphs[0].text
+
+
+def test_word_sop_auto_note():
+    auto = Document(str(_path_of(make_word(sample_note(), sop_auto=True))))
+    blocks = _doc_blocks(auto)
+    assert office.SOP_AUTO_NOTE in blocks
+    assert blocks.index(office.SOP_AUTO_NOTE) < blocks.index("Recommendation")   # right under the SOP table
+
+    plain = _doc_blocks(Document(str(_path_of(make_word(sample_note())))))
+    assert office.SOP_AUTO_NOTE not in plain and not any("{{" in b for b in plain)
+
+    empty = _doc_blocks(Document(str(_path_of(make_word(sample_note(sop_references=[]), sop_auto=True)))))
+    assert office.SOP_AUTO_NOTE not in empty                                       # nothing auto-added to label
