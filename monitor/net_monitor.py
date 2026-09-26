@@ -12,8 +12,16 @@ Per socket:
     connection happened.
   - group "attempt": SYN_SENT (and SYN_RECV) = tried to connect but never
     did, e.g. blocked by the firewall. Shown, never counted as a leak.
-  - origin "ours": the backend (this pid and its children), Ollama,
-    Streamlit, Docker Desktop / WSL. These are the sovereign proof.
+  - origin "ours", split into two components:
+      component "core": the backend pid tree (this process and all its
+        children), Ollama and the Streamlit UI. This is the sovereign proof.
+      component "platform": Docker Desktop and the WSL host services
+        (com.docker.*, vpnkit, wsl*, vmmem*). They run the sandbox but also
+        phone home on their own (update checks, usage statistics), so they
+        are shown and counted separately, never hidden.
+    Core membership comes from the pid tree or the Ollama/Streamlit names;
+    a python.exe outside the backend's pid tree (an IDE language server,
+    another script) is NOT core.
     origin "other_app": any other app on the laptop, shown for information.
     origin "probe": the backend's own /api/network/probe connection to the
     probe target (while the probe runs, plus PROBE_GRACE_S for TIME_WAIT).
@@ -21,7 +29,8 @@ Per socket:
 Each unique (pid, remote ip, remote port, group) is recorded ONCE, with its
 first-seen time, and writes one audit record plus one warning line in
 logs/backend.log. The headline number (external_seen_since_start) counts
-only origin "ours" + group "established".
+only component "core" + group "established" (a LEAK). Platform connections
+are counted in platform_seen_since_start and audited under their own name.
 
 Limits of polling: a connection that opens and closes between two polls is
 missed, and a closed socket in TIME_WAIT has pid 0 on Windows (owner
@@ -51,22 +60,20 @@ from shared.contracts import Connection, NetworkStatus
 
 Group = Literal["established", "attempt"]
 Origin = Literal["ours", "other_app", "probe"]   # values match shared.contracts.Connection.origin
+Component = Literal["core", "platform"]          # values match shared.contracts.Connection.component
 
 ATTEMPT_STATES = frozenset({psutil.CONN_SYN_SENT, psutil.CONN_SYN_RECV})
 MIN_POLL_S = 0.2                 # floor for WB_NET_POLL_S so a typo can't spin a core
 PROBE_GRACE_S = 240.0            # probe sockets linger in TIME_WAIT up to 4 min on Windows
 STOP_JOIN_S = 5.0
 
-# Process names (lower case, ".exe" stripped) that belong to the workbench stack.
-OUR_PROCESS_NAMES = frozenset({
-    "ollama", "ollama app", "ollama_llama_server",
-    "streamlit",
-    "docker", "dockerd", "docker desktop", "com.docker.backend", "com.docker.build", "com.docker.proxy",
-    "com.docker.dev-envs", "vpnkit",
-    "wsl", "wslhost", "wslservice", "wslrelay", "vmmem", "vmmemwsl",
-})
+# Process names (lower case, ".exe" stripped). The backend itself is core by pid tree, not by name.
+CORE_PROCESS_NAMES = frozenset({"ollama", "ollama app", "ollama_llama_server", "streamlit"})
+PLATFORM_PROCESS_NAMES = frozenset({"docker", "dockerd", "docker desktop", "vpnkit"})
+PLATFORM_NAME_PREFIXES = ("com.docker.", "wsl", "vmmem")
 _PYTHON_NAMES = frozenset({"python", "pythonw", "python3"})
 ORIGIN_LABELS: dict[str, str] = {"ours": "ours", "other_app": "other app", "probe": "probe"}
+COMPONENT_LABELS: dict[str, str] = {"core": "ours: core", "platform": "ours: platform"}
 
 NAME_ACCESS_DENIED = "<access denied>"
 NAME_GONE = "<process gone>"
@@ -86,16 +93,36 @@ class SeenConnection:
     group: Group
     origin: Origin
     first_seen: datetime
+    component: Optional[Component] = None  # set only when origin == "ours"
 
     @property
     def is_leak(self) -> bool:
-        return self.origin == "ours" and self.group == "established"
+        """A core external connection: breaks the sovereign claim."""
+        return self.component == "core" and self.group == "established"
+
+    @property
+    def is_platform_connection(self) -> bool:
+        """Docker Desktop / WSL reached the outside: not workbench code, but shown and flagged."""
+        return self.component == "platform" and self.group == "established"
+
+    @property
+    def label(self) -> str:
+        return COMPONENT_LABELS[self.component] if self.component else ORIGIN_LABELS[self.origin]
 
 
 # ---------------------------------------------------------------- pure helpers
 def _normalize_name(name: str) -> str:
     name = name.strip().lower()
     return name[:-4] if name.endswith(".exe") else name
+
+
+def component_by_name(normalized: str) -> Optional[Component]:
+    """Component a process belongs to by its (normalized) name alone; None = not ours by name."""
+    if normalized in CORE_PROCESS_NAMES:
+        return "core"
+    if normalized in PLATFORM_PROCESS_NAMES or normalized.startswith(PLATFORM_NAME_PREFIXES):
+        return "platform"
+    return None
 
 
 def remote_of(conn: Any) -> Optional[tuple[str, int]]:
@@ -156,7 +183,7 @@ class NetMonitor:
         self._checked_at: Optional[datetime] = None
         self._error: Optional[str] = None
         self._probe_ips: dict[str, float] = {}  # ip -> monotonic expiry (inf while the probe runs)
-        self._describe_cache: dict[int, tuple[str, bool]] = {}
+        self._describe_cache: dict[int, tuple[str, Optional[Component]]] = {}
         self.started_at = datetime.now(timezone.utc)
 
         self._stop = threading.Event()
@@ -222,10 +249,10 @@ class NetMonitor:
             pass  # children unreadable: the backend pid itself is still ours
         return pids
 
-    def _describe(self, pid: Optional[int]) -> tuple[str, bool]:
-        """(process name, belongs to the workbench stack by name). Cached per pid."""
+    def _describe(self, pid: Optional[int]) -> tuple[str, Optional[Component]]:
+        """(process name, component by name or None). Cached per pid."""
         if not pid:
-            return NAME_CLOSED, False
+            return NAME_CLOSED, None
         cached = self._describe_cache.get(pid)
         if cached is not None:
             return cached
@@ -233,17 +260,17 @@ class NetMonitor:
             process = self.process_fn(pid)
             name = process.name()
         except psutil.AccessDenied:
-            result = (NAME_ACCESS_DENIED, False)
+            result: tuple[str, Optional[Component]] = (NAME_ACCESS_DENIED, None)
         except psutil.NoSuchProcess:
-            result = (NAME_GONE, False)
+            result = (NAME_GONE, None)
         except Exception:
-            result = (NAME_UNKNOWN, False)
+            result = (NAME_UNKNOWN, None)
         else:
             normalized = _normalize_name(name)
-            ours = normalized in OUR_PROCESS_NAMES
-            if not ours and normalized in _PYTHON_NAMES:
-                ours = self._is_streamlit(process)
-            result = (name, ours)
+            component = component_by_name(normalized)
+            if component is None and normalized in _PYTHON_NAMES and self._is_streamlit(process):
+                component = "core"
+            result = (name, component)
         self._describe_cache[pid] = result
         return result
 
@@ -254,13 +281,15 @@ class NetMonitor:
         except Exception:
             return False
 
-    def _origin(self, pid: Optional[int], ours_by_name: bool, ip: str, our_pids: set[int],
-                probe_ips: set[str]) -> Origin:
+    def _classify(self, pid: Optional[int], named: Optional[Component], ip: str, our_pids: set[int],
+                  probe_ips: set[str]) -> tuple[Origin, Optional[Component]]:
         if ip in probe_ips and (pid in our_pids or not pid):
-            return "probe"
-        if ours_by_name or pid in our_pids:
-            return "ours"
-        return "other_app"
+            return "probe", None
+        if pid in our_pids:
+            return "ours", "core"                        # the backend pid tree wins over any name
+        if named is not None:
+            return "ours", named
+        return "other_app", None
 
     # ------------------------------------------------------------ polling
     def poll_once(self) -> None:
@@ -295,24 +324,24 @@ class NetMonitor:
             pid = conn.pid
             if pid:
                 live_pids.add(pid)
-            name, ours_by_name = self._describe(pid)
+            name, named = self._describe(pid)
             group = state_group(conn.status)
-            origin = self._origin(pid, ours_by_name, ip, our_pids, probe_ips)
-            if origin == "ours" and group == "established":
+            origin, component = self._classify(pid, named, ip, our_pids, probe_ips)
+            if component == "core" and group == "established":
                 current_leaks += 1
             key = (pid, ip, port, group)
             with self._state_lock:
                 seen = self._seen.get(key)
                 is_new = seen is None
                 if is_new:
-                    seen = SeenConnection(pid, name, ip, port, conn.status, group, origin, now)
+                    seen = SeenConnection(pid, name, ip, port, conn.status, group, origin, now, component)
                     self._seen[key] = seen
             if is_new:
                 new.append(seen)
             current.append(Connection(
-                pid=pid, process=f"{name} [{ORIGIN_LABELS[origin]}]", local=_fmt_local(conn),
+                pid=pid, process=f"{name} [{seen.label}]", local=_fmt_local(conn),
                 remote=_fmt(ip, port), status=conn.status, external=True,
-                group=group, origin=origin, first_seen=seen.first_seen))
+                group=group, origin=origin, component=component, first_seen=seen.first_seen))
 
         self._describe_cache = {pid: v for pid, v in self._describe_cache.items() if pid in live_pids}
         with self._state_lock:
@@ -334,16 +363,28 @@ class NetMonitor:
             self.log.error("Network monitor: %s (monitor keeps running)", message)
 
     def _report(self, seen: SeenConnection) -> None:
-        label = ORIGIN_LABELS[seen.origin]
+        """
+        Core:     name "external_connection", ok=False when established (LEAK).
+        Platform: name "platform_connection", ok=False when established (flagged, not a core leak).
+        Other apps, probe, attempts: ok=True.
+        """
+        if seen.is_leak:
+            flag = " (LEAK)"
+        elif seen.is_platform_connection:
+            flag = " (PLATFORM: Docker Desktop / WSL, not workbench code)"
+        else:
+            flag = ""
         self.log.warning(
             "New external connection%s [%s, %s]: %s (pid %s) -> %s status %s",
-            " (LEAK)" if seen.is_leak else "", label, seen.group, seen.process, seen.pid,
+            flag, seen.label, seen.group, seen.process, seen.pid,
             _fmt(seen.remote_ip, seen.remote_port), seen.status)
         detail = asdict(seen)
         detail["first_seen"] = seen.first_seen.isoformat()
-        detail["label"] = label
-        write_audit_record(kind="network", name="external_connection",
-                           target=_fmt(seen.remote_ip, seen.remote_port), ok=not seen.is_leak, detail=detail)
+        detail["label"] = seen.label
+        name = "platform_connection" if seen.component == "platform" else "external_connection"
+        ok = not (seen.is_leak or seen.is_platform_connection)
+        write_audit_record(kind="network", name=name,
+                           target=_fmt(seen.remote_ip, seen.remote_port), ok=ok, detail=detail)
 
     # ------------------------------------------------------------ read side
     def seen(self) -> list[SeenConnection]:
@@ -351,7 +392,7 @@ class NetMonitor:
             return sorted(self._seen.values(), key=lambda s: s.first_seen)
 
     def summary(self) -> dict[str, Any]:
-        """Counts behind the optional NetworkStatus fields (contract 1.0.1) and the X-Net-* headers."""
+        """Counts behind the optional NetworkStatus fields (contract 1.0.2) and the X-Net-* headers."""
         seen = self.seen()
         with self._state_lock:
             error = self._error
@@ -361,6 +402,9 @@ class NetMonitor:
             "attempts_since_start": sum(1 for s in seen if s.group == "attempt" and s.origin != "probe"),
             "other_apps_since_start": sum(1 for s in seen if s.origin == "other_app" and s.group == "established"),
             "probe_since_start": sum(1 for s in seen if s.origin == "probe"),
+            "platform_seen_since_start": sum(1 for s in seen if s.is_platform_connection),
+            "platform_attempts_since_start": sum(1 for s in seen
+                                                 if s.component == "platform" and s.group == "attempt"),
             "error": error,
         }
 
@@ -379,6 +423,8 @@ class NetMonitor:
                 other_apps_since_start=summary["other_apps_since_start"],
                 probe_since_start=summary["probe_since_start"],
                 monitor_error=summary["error"],
+                platform_seen_since_start=summary["platform_seen_since_start"],
+                platform_attempts_since_start=summary["platform_attempts_since_start"],
             )
 
 

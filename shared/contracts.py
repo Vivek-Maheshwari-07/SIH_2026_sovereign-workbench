@@ -57,7 +57,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-CONTRACT_VERSION = "1.0.1"
+CONTRACT_VERSION = "1.0.2"
 API_PREFIX = "/api"
 
 ERROR_CODES = {
@@ -276,21 +276,30 @@ class Connection(BaseModel):
     group: Optional[Literal["established", "attempt"]] = None  # attempt = SYN_SENT/SYN_RECV, never connected
     origin: Optional[Literal["ours", "other_app", "probe"]] = None  # ours = backend/Ollama/UI/Docker/WSL
     first_seen: Optional[datetime] = None  # when the monitor first saw this (pid, remote, group)
+    # 1.0.2 (optional), set only when origin == "ours":
+    #   core     = backend pid tree (backend + all its children), Ollama, Streamlit UI -> the sovereign proof
+    #   platform = Docker Desktop / WSL host services (com.docker.*, vpnkit, wsl*, vmmem*) -> counted apart
+    component: Optional[Literal["core", "platform"]] = None
 
 
 class NetworkStatus(BaseModel):
     checked_at: datetime
-    external_count: int            # external connections right now
-    external_seen_since_start: int # total ever seen since backend start (the headline number)
+    external_count: int            # CORE external connections right now (group established;
+                                   # see Connection.component). Platform, other apps, probe excluded.
+    external_seen_since_start: int # unique CORE established external connections since backend start
+                                   # (the headline number). Platform, other apps, probe, attempts excluded.
     total_connections: int
     firewall_outbound_blocked: Optional[bool] = None  # None = could not read
     connections: list[Connection]  # non-listening, non-loopback only
-    # 1.0.1 (optional). external_seen_since_start counts origin "ours" + group "established" only.
+    # 1.0.1 (optional).
     since: Optional[datetime] = None               # monitor start = start of the *_since_start counts
     attempts_since_start: Optional[int] = None     # unique attempts (not probe), never counted as leaks
     other_apps_since_start: Optional[int] = None   # unique established connections of other apps (info only)
     probe_since_start: Optional[int] = None        # unique connections made by /network/probe
     monitor_error: Optional[str] = None            # last psutil error; None = monitor healthy
+    # 1.0.2 (optional). Docker Desktop / WSL (Connection.component "platform"), counted apart from core.
+    platform_seen_since_start: Optional[int] = None      # unique established platform connections
+    platform_attempts_since_start: Optional[int] = None  # unique platform attempts (also inside attempts_since_start)
 
 
 class ProbeRequest(BaseModel):

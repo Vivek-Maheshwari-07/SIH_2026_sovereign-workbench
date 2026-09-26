@@ -119,8 +119,10 @@ def test_external_established_counted_once_over_many_polls(caplog):
     status = mon.status(None)
     assert status.external_seen_since_start == 1 and status.external_count == 1
     first = status.connections[0]
-    assert first.remote == f"{GOOGLE}:443" and first.process == "python.exe [ours]"
-    assert first.group == "established" and first.origin == "ours" and first.first_seen is not None
+    assert first.remote == f"{GOOGLE}:443" and first.process == "python.exe [ours: core]"
+    assert first.group == "established" and first.origin == "ours" and first.component == "core"
+    assert first.first_seen is not None
+    assert status.platform_seen_since_start == 0 and status.platform_attempts_since_start == 0
     assert status.since == mon.started_at and status.monitor_error is None
     assert status.attempts_since_start == 0 and status.other_apps_since_start == 0 and status.probe_since_start == 0
     mon.poll_once()
@@ -195,27 +197,107 @@ def test_process_name_access_denied_and_gone_are_handled():
     assert mon.status(None).external_seen_since_start == 0 and mon.summary()["other_apps_since_start"] == 2
 
 
-def test_our_processes_vs_other_apps():
-    procs = {
+CORE_PIDS = (CHILD_PID, 2001, 2002, 2003, 2004)
+PLATFORM_PIDS = (4001, 4002, 4003, 4004, 4005, 4006)
+OTHER_PIDS = (3001, 3002, 3003)
+
+
+def _mixed_processes():
+    return {
         2001: FakeProcess(2001, "ollama.exe"),
-        2002: FakeProcess(2002, "Docker Desktop.exe"),
-        2003: FakeProcess(2003, "python.exe", cmdline=("python", "-m", "streamlit", "run", "ui/app.py")),
-        2004: FakeProcess(2004, "wslrelay.exe"),
-        3001: FakeProcess(3001, "python.exe", cmdline=("python", "other_script.py")),
+        2002: FakeProcess(2002, "ollama app.exe"),
+        2003: FakeProcess(2003, "ollama_llama_server.exe"),
+        2004: FakeProcess(2004, "python.exe", cmdline=("python", "-m", "streamlit", "run", "ui/app.py")),
+        4001: FakeProcess(4001, "com.docker.backend.exe"),
+        4002: FakeProcess(4002, "Docker Desktop.exe"),
+        4003: FakeProcess(4003, "vpnkit.exe"),
+        4004: FakeProcess(4004, "wslrelay.exe"),
+        4005: FakeProcess(4005, "wslservice.exe"),
+        4006: FakeProcess(4006, "vmmemWSL"),
+        3001: FakeProcess(3001, "python.exe", cmdline=("python", "-m", "pylsp")),   # IDE language server
         3002: FakeProcess(3002, "chrome.exe"),
+        3003: FakeProcess(3003, "language_server_windows_x64.exe"),
     }
-    table = [conn(pid=pid, remote=(f"20.0.0.{pid % 100}", 443)) for pid in procs]
-    table.append(conn(pid=CHILD_PID, remote=("20.0.1.1", 443)))            # backend child process
+
+
+def test_core_vs_platform_vs_other_app_marking():
+    procs = _mixed_processes()
+    table = [conn(pid=pid, remote=(f"20.0.{pid // 1000}.{pid % 100}", 443)) for pid in procs]
+    table.append(conn(pid=CHILD_PID, remote=("20.0.9.9", 443)))            # backend child (sandbox runner etc.)
     mon = make_monitor(table, procs)
     mon.poll_once()
-    labels = {c.pid: c.process for c in mon.status(None).connections}
-    assert all(labels[pid].endswith("[ours]") for pid in (2001, 2002, 2003, 2004, CHILD_PID))
-    assert labels[3001] == "python.exe [other app]" and labels[3002] == "chrome.exe [other app]"
-    origins = {c.pid: c.origin for c in mon.status(None).connections}
-    assert {origins[p] for p in (2001, 2002, 2003, 2004, CHILD_PID)} == {"ours"}
-    assert origins[3001] == origins[3002] == "other_app"
+    by_pid = {c.pid: c for c in mon.status(None).connections}
+
+    for pid in CORE_PIDS:
+        assert (by_pid[pid].origin, by_pid[pid].component) == ("ours", "core"), pid
+        assert by_pid[pid].process.endswith("[ours: core]")
+    for pid in PLATFORM_PIDS:
+        assert (by_pid[pid].origin, by_pid[pid].component) == ("ours", "platform"), pid
+        assert by_pid[pid].process.endswith("[ours: platform]")
+    for pid in OTHER_PIDS:
+        assert (by_pid[pid].origin, by_pid[pid].component) == ("other_app", None), pid
+        assert by_pid[pid].process.endswith("[other app]")
+
+
+def test_docker_backend_is_platform_not_core_and_not_hidden(caplog):
+    """The real A9 finding: com.docker.backend.exe update checks / usage stats to AWS and Cloudflare."""
+    procs = {4001: FakeProcess(4001, "com.docker.backend.exe")}
+    table = [conn(pid=4001, remote=("52.1.2.3", 443)), conn(pid=4001, remote=("104.16.1.1", 443)),
+             conn(pid=4001, remote=("52.9.9.9", 443), status="SYN_SENT")]
+    mon = make_monitor(table, procs)
+    with caplog.at_level(logging.WARNING, logger="backend.net_monitor"):
+        mon.poll_once()
+        mon.poll_once()
     status = mon.status(None)
-    assert status.external_seen_since_start == 5 and status.other_apps_since_start == 2
+    assert status.external_seen_since_start == 0 and status.external_count == 0     # core headline stays 0
+    assert status.platform_seen_since_start == 2 and status.platform_attempts_since_start == 1
+    assert status.attempts_since_start == 1                                         # platform attempt included
+    assert len(status.connections) == 3                                             # shown, not hidden
+
+    platform = [r for r in read_audit_records(limit=100) if r.name == "platform_connection"]
+    assert len(platform) == 3 and network_audit() == []                             # separate audit name
+    assert sorted(r.ok for r in platform) == [False, False, True]                   # attempt never connected
+    assert all(r.detail["component"] == "platform" and r.detail["label"] == "ours: platform" for r in platform)
+    messages = [r.getMessage() for r in caplog.records if "New external connection" in r.getMessage()]
+    assert len(messages) == 3 and sum("PLATFORM" in m for m in messages) == 2
+    assert not any("LEAK" in m for m in messages)
+
+
+def test_python_outside_backend_pid_tree_is_other_app():
+    procs = {3001: FakeProcess(3001, "python.exe", cmdline=("python", "-m", "pylsp")),
+             3004: FakeProcess(3004, "python.exe", error=psutil.AccessDenied(3004))}
+    table = [conn(pid=3001, remote=("20.1.1.1", 443)), conn(pid=3004, remote=("20.1.1.2", 443)),
+             conn(pid=CHILD_PID, remote=("20.1.1.3", 443))]
+    mon = make_monitor(table, procs)
+    mon.poll_once()
+    by_pid = {c.pid: c for c in mon.status(None).connections}
+    assert by_pid[3001].origin == by_pid[3004].origin == "other_app"
+    assert by_pid[CHILD_PID].component == "core"                                    # same exe name, in the tree
+    assert mon.status(None).external_seen_since_start == 1
+
+
+def test_counters_split_core_platform_other_attempts_probe():
+    procs = _mixed_processes()
+    table = [conn(pid=pid, remote=(f"20.0.{pid // 1000}.{pid % 100}", 443)) for pid in procs]
+    table += [conn(pid=CHILD_PID, remote=("20.0.9.9", 443)),
+              conn(pid=2001, remote=("20.5.5.5", 443), status="SYN_SENT"),          # core attempt
+              conn(pid=4001, remote=("20.6.6.6", 443), status="SYN_SENT"),          # platform attempt
+              conn(pid=BACKEND_PID, remote=(GOOGLE, 443))]                          # probe
+    mon = make_monitor(table, procs)
+    mon.begin_probe([GOOGLE])
+    for _ in range(3):
+        mon.poll_once()
+    status = mon.status(None)
+    assert status.external_seen_since_start == len(CORE_PIDS) and status.external_count == len(CORE_PIDS)
+    assert status.platform_seen_since_start == len(PLATFORM_PIDS)
+    assert status.platform_attempts_since_start == 1
+    assert status.other_apps_since_start == len(OTHER_PIDS)
+    assert status.attempts_since_start == 2 and status.probe_since_start == 1
+
+    table.clear()                                                                   # all closed
+    mon.poll_once()
+    status = mon.status(None)
+    assert status.external_count == 0 and status.external_seen_since_start == len(CORE_PIDS)
 
 
 def test_psutil_error_is_reported_and_monitor_recovers():
@@ -377,27 +459,51 @@ def test_status_endpoint_validates_and_carries_monitor_facts(client, monkeypatch
     resp = client.get(f"{API_PREFIX}/network/status")
     assert resp.status_code == 200
     body = resp.json()
-    for key in ("since", "attempts_since_start", "other_apps_since_start", "probe_since_start", "monitor_error"):
-        assert key in body                                                  # contract 1.0.1 fields are sent
+    for key in ("since", "attempts_since_start", "other_apps_since_start", "probe_since_start", "monitor_error",
+                "platform_seen_since_start", "platform_attempts_since_start"):
+        assert key in body                                                  # contract 1.0.1 + 1.0.2 fields are sent
+    assert all("component" in c for c in body["connections"])
     status = NetworkStatus.model_validate(body)
     assert status.firewall_outbound_blocked is True and status.external_seen_since_start == 0
     assert any(c.remote == "20.9.9.9:443" and c.group == "attempt" and c.origin == "other_app"
-               and c.first_seen is not None for c in status.connections)
+               and c.component is None and c.first_seen is not None for c in status.connections)
     assert status.attempts_since_start >= 1 and status.since is not None
+    assert status.platform_seen_since_start == 0 and status.platform_attempts_since_start == 0
     assert int(resp.headers["X-Net-Attempts-Since-Start"]) == status.attempts_since_start  # headers kept, same facts
-    assert resp.headers["X-Contract-Version"] == "1.0.1"
+    assert resp.headers["X-Contract-Version"] == "1.0.2"
+
+
+_OLD_1_0_0 = {"checked_at": "2026-09-26T00:00:00Z", "external_count": 0, "external_seen_since_start": 0,
+              "total_connections": 3, "firewall_outbound_blocked": None,
+              "connections": [{"pid": 1, "process": "x", "local": "10.0.0.5:1", "remote": "20.0.0.1:443",
+                               "status": "ESTABLISHED", "external": True}]}
+_OLD_1_0_1 = {**_OLD_1_0_0, "since": "2026-09-26T00:00:00Z", "attempts_since_start": 1,
+              "other_apps_since_start": 4, "probe_since_start": 0, "monitor_error": None,
+              "connections": [{**_OLD_1_0_0["connections"][0], "group": "established", "origin": "ours",
+                               "first_seen": "2026-09-26T00:00:01Z"}]}
 
 
 def test_contract_1_0_payload_still_validates():
-    """The 1.0.1 fields are optional: a 1.0.0-shaped payload (e.g. an old mock) still parses."""
-    old = {"checked_at": "2026-09-26T00:00:00Z", "external_count": 0, "external_seen_since_start": 0,
-           "total_connections": 3, "firewall_outbound_blocked": None,
-           "connections": [{"pid": 1, "process": "x", "local": "10.0.0.5:1", "remote": "20.0.0.1:443",
-                            "status": "ESTABLISHED", "external": True}]}
-    status = NetworkStatus.model_validate(old)
+    """All newer fields are optional: a 1.0.0-shaped payload (e.g. an old mock) still parses."""
+    status = NetworkStatus.model_validate(_OLD_1_0_0)
     assert status.since is None and status.monitor_error is None and status.connections[0].origin is None
     with pytest.raises(ValueError):
-        NetworkStatus.model_validate({**old, "connections": [{**old["connections"][0], "origin": "other"}]})
+        NetworkStatus.model_validate({**_OLD_1_0_0, "connections": [{**_OLD_1_0_0["connections"][0],
+                                                                     "origin": "other"}]})
+
+
+def test_contract_1_0_1_payload_still_validates_and_1_0_2_fields_check_values():
+    status = NetworkStatus.model_validate(_OLD_1_0_1)
+    assert status.attempts_since_start == 1 and status.connections[0].origin == "ours"
+    assert status.platform_seen_since_start is None and status.platform_attempts_since_start is None
+    assert status.connections[0].component is None
+
+    new = {**_OLD_1_0_1, "platform_seen_since_start": 5, "platform_attempts_since_start": 0,
+           "connections": [{**_OLD_1_0_1["connections"][0], "component": "platform"}]}
+    parsed = NetworkStatus.model_validate(new)
+    assert parsed.platform_seen_since_start == 5 and parsed.connections[0].component == "platform"
+    with pytest.raises(ValueError):
+        NetworkStatus.model_validate({**new, "connections": [{**new["connections"][0], "component": "docker"}]})
 
 
 @pytest.mark.parametrize("outcome", ["success", "timeout"])
