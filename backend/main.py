@@ -1,7 +1,8 @@
 """
 FastAPI app for Track A. Implements every endpoint in shared.contracts;
 endpoints not yet built by their ticket are stubs marked with a TODO, but
-they still return valid contract shapes. Every response carries the
+they still return valid contract shapes. The app lifespan also starts and
+stops the network monitor (monitor/net_monitor.py). Every response carries the
 X-Contract-Version header. /docs and /redoc are disabled because they load
 assets from a CDN, which would break the "no external calls" proof
 (AGENTS.md rule 3); /openapi.json stays on since it is generated locally.
@@ -17,12 +18,14 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend import agent
+from backend.audit import read_audit_records
+from backend.net_probe import run_probe
 from backend.file_store import file_store
 from backend.registry import registry
 from backend.llm_client import LLMError
@@ -32,6 +35,8 @@ from backend.tools.sandbox import sandbox_available
 from backend.router import route as run_router
 from backend.settings import settings
 from backend.task_store import task_store
+from monitor import firewall
+from monitor.net_monitor import monitor
 from shared.contracts import (
     API_PREFIX,
     CONTRACT_VERSION,
@@ -94,7 +99,10 @@ logger = _setup_logging()
 async def lifespan(app: FastAPI):
     task_store.start(agent.run)
     logger.info("Task worker started")
+    monitor.start()
+    firewall.firewall_outbound_blocked()  # start the first (slow) firewall read in the background
     yield
+    monitor.stop()
     task_store.stop()
     logger.info("Task worker stopped")
 
@@ -276,35 +284,29 @@ async def get_artifact(artifact_id: str):
     return FileResponse(path, media_type=office.media_type(artifact.kind), filename=artifact.filename)
 
 
+# ---------------------------------------------------------------- network proof
+def _net_headers(summary: dict) -> dict[str, str]:
+    """Monitor facts NetworkStatus has no field for yet (contract change proposed in A9 notes)."""
+    headers = {
+        "X-Net-Since": summary["since"].isoformat(),
+        "X-Net-Attempts-Since-Start": str(summary["attempts_since_start"]),
+        "X-Net-Other-Apps-Since-Start": str(summary["other_apps_since_start"]),
+        "X-Net-Probe-Since-Start": str(summary["probe_since_start"]),
+    }
+    if summary["error"]:
+        headers["X-Net-Monitor-Error"] = summary["error"].encode("ascii", "replace").decode("ascii")[:300]
+    return headers
+
+
 @app.get(f"{API_PREFIX}/network/status", response_model=NetworkStatus)
-async def get_network_status() -> NetworkStatus:
-    # TODO(A9): real connection snapshot via psutil + firewall-rule check.
-    return NetworkStatus(
-        checked_at=datetime.now(timezone.utc),
-        external_count=0,
-        external_seen_since_start=0,
-        total_connections=0,
-        firewall_outbound_blocked=None,  # None = "could not read", which is honest here: nothing checked it
-        connections=[],
-    )
+def get_network_status(response: Response) -> NetworkStatus:
+    response.headers.update(_net_headers(monitor.summary()))
+    return monitor.status(firewall.firewall_outbound_blocked())
 
 
 @app.post(f"{API_PREFIX}/network/probe", response_model=ProbeResult)
-async def post_network_probe(payload: ProbeRequest) -> ProbeResult:
-    # TODO(A9): real outbound probe + firewall proof.
-    #
-    # Design choice: this endpoint does NOT attempt any network call at all
-    # (reachable is always False, duration_ms is always 0) rather than faking
-    # a "we tried and it failed" probe. The contract's ProbeResult has an
-    # `error: Optional[str]` field, so "not implemented yet" is expressed
-    # there in plain text — that's the signal the UI (or a human) should read
-    # as "no real probe ran" rather than "we probed and confirmed isolation".
-    return ProbeResult(
-        target=payload.target,
-        reachable=False,
-        error="Not implemented yet (ticket A9): no network probe was attempted.",
-        duration_ms=0,
-    )
+def post_network_probe(payload: ProbeRequest) -> ProbeResult:
+    return run_probe(payload.target)
 
 
 @app.get(f"{API_PREFIX}/kb/stats", response_model=KBStats)
@@ -329,34 +331,12 @@ async def post_admin_prewarm() -> PrewarmResult:
 
 
 # ---------------------------------------------------------------- audit
-def _read_audit_log(*, task_id: Optional[str], limit: int) -> list[AuditRecord]:
-    log_path = _resolve(settings.WB_LOG_DIR) / "audit.jsonl"
-    if not log_path.exists():
-        return []
-
-    records: list[AuditRecord] = []
-    with log_path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                records.append(AuditRecord.model_validate_json(line))
-            except Exception:
-                continue  # skip a malformed line rather than failing the whole request
-
-    if task_id is not None:
-        records = [r for r in records if r.task_id == task_id]
-
-    return list(reversed(records[-limit:]))  # most recent first
-
-
 @app.get(f"{API_PREFIX}/audit", response_model=list[AuditRecord])
 async def get_audit(
     task_id: Optional[str] = None,
     limit: int = Query(default=100, ge=1, le=1000),
 ) -> list[AuditRecord]:
-    return _read_audit_log(task_id=task_id, limit=limit)
+    return read_audit_records(task_id=task_id, limit=limit)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,8 @@
 In-memory task store: task_id -> TaskState + its AgentEvent history, backed
 by one queue and one worker thread (AGENTS.md rule 9: plain threads, no
 async magic in the agent loop). Every read and write goes through one lock.
+Task creation and every finish (succeeded / failed / cancelled) write an
+audit record (kind "system"), outside the lock.
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from backend.audit import write_audit_record
 from shared.contracts import (
     TERMINAL_STATUSES,
     AgentEvent,
@@ -25,6 +28,23 @@ from shared.contracts import (
     TaskState,
     TaskStatus,
 )
+
+
+def _audit_created(state: TaskState) -> None:
+    write_audit_record(kind="system", name="task_created", task_id=state.task_id, detail={
+        "mode": state.mode.value, "scenario": state.scenario.value if state.scenario else None,
+        "files": len(state.file_ids)})
+
+
+def _audit_finished(state: Optional[TaskState]) -> None:
+    if state is None or state.status not in TERMINAL_STATUSES:
+        return
+    end = state.finished_at or datetime.now(timezone.utc)
+    write_audit_record(
+        kind="system", name="task_finished", task_id=state.task_id,
+        duration_ms=int((end - state.created_at).total_seconds() * 1000),
+        ok=state.status == TaskStatus.SUCCEEDED,
+        detail={"status": state.status.value, "error_code": state.error.code if state.error else None})
 
 
 def new_task_id() -> str:
@@ -166,8 +186,10 @@ class TaskStore:
         )
         with self._lock:
             self._tasks[task_id] = record
+            state = record.to_state()
+        _audit_created(state)
         self._queue.put(task_id)
-        return record.to_state()
+        return state
 
     def get(self, task_id: str) -> Optional[TaskState]:
         with self._lock:
@@ -194,11 +216,13 @@ class TaskStore:
             return page, last_seq, done
 
     def cancel(self, task_id: str) -> Optional[TaskState]:
+        cancelled_while_queued = False
         with self._lock:
             record = self._tasks.get(task_id)
             if record is None:
                 return None
             if record.status == TaskStatus.QUEUED:
+                cancelled_while_queued = True
                 # Never starts: the worker checks status before running a task.
                 record.status = TaskStatus.CANCELLED
                 record.cancel_requested = True
@@ -207,7 +231,10 @@ class TaskStore:
             elif record.status == TaskStatus.RUNNING:
                 # The agent checks is_cancelled() between its own steps.
                 record.cancel_requested = True
-            return record.to_state()
+            state = record.to_state()
+        if cancelled_while_queued:
+            _audit_finished(state)
+        return state
 
     # ------------------------------------------------------------ internals used by TaskHandle
     def _is_cancel_requested(self, task_id: str) -> bool:
@@ -293,6 +320,10 @@ class TaskStore:
                     record.status = TaskStatus.FAILED
                     record.error = error
                     record.finished_at = datetime.now(timezone.utc)
+                    final_state = record.to_state()
+                else:
+                    final_state = None
+            _audit_finished(final_state)
             return
 
         with self._lock:
@@ -307,6 +338,8 @@ class TaskStore:
             else:
                 record.status = TaskStatus.SUCCEEDED
             record.finished_at = datetime.now(timezone.utc)
+            final_state = record.to_state()
+        _audit_finished(final_state)
 
 
 task_store = TaskStore()

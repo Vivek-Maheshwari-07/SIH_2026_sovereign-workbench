@@ -11,6 +11,7 @@ emits an artifact event (keys as in shared.contracts).
 """
 from __future__ import annotations
 
+import json
 import re
 import secrets
 import time
@@ -18,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from backend import llm_client
+from backend.audit import write_audit_record
 from backend.file_store import file_store
 from backend.flows import code_flow
 from backend.registry import registry
@@ -44,6 +46,7 @@ MIN_KB_SCORE = 0.57                 # hits below this are never shown or cited (
 DOC_PROMPT_MAX_CHARS = 14000        # document text given to draft_approval_note (fits WB_NUM_CTX 8192)
 MAX_TOP_K = 10
 MAX_FILLED_SOP_REFS = 3             # retrieved passages cited when the model cites none
+AUDIT_ARGS_CHARS = 300              # tool arguments kept in the audit record
 # Seen live: after the Excel file was saved the 4B model wandered off into run_code_task and timed out.
 NEXT_FINISH = "The file is ready. Next step: call finish with a short answer naming the file."
 
@@ -488,8 +491,11 @@ def execute_tool(ctx: ToolContext, name: str, args: Any) -> ToolOutcome:
         ctx.event(EventType.ERROR, f"{name} failed", {"error": ErrorInfo(code="INTERNAL", message=repr(exc),
                                                                           retryable=True).model_dump()})
     outcome.summary = trim(outcome.summary)
+    duration_ms = int((time.monotonic() - start) * 1000)
     ctx.event(EventType.TOOL_RESULT, f"{name}: {'ok' if outcome.ok else 'failed'}", {
-        "tool": name, "ok": outcome.ok, "summary": outcome.summary,
-        "duration_ms": int((time.monotonic() - start) * 1000),
+        "tool": name, "ok": outcome.ok, "summary": outcome.summary, "duration_ms": duration_ms,
     })
+    write_audit_record(kind="tool", name=name, task_id=ctx.task_id, duration_ms=duration_ms, ok=outcome.ok,
+                       detail={"args": _one_line(json.dumps(args, default=str), AUDIT_ARGS_CHARS),
+                               "error_code": outcome.error_code})
     return outcome

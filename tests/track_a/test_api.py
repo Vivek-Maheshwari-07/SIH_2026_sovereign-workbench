@@ -155,18 +155,20 @@ def test_kb_search_on_empty_kb_returns_empty_hits(client: TestClient):
     assert result.hits == []
 
 
-def test_network_status_stub_returns_valid_shape(client: TestClient):
+def test_network_status_returns_valid_shape(client: TestClient):
     resp = client.get(f"{API_PREFIX}/network/status")
     assert resp.status_code == 200
     NetworkStatus.model_validate(resp.json())
+    assert "X-Net-Since" in resp.headers
 
 
-def test_network_probe_stub_does_not_claim_a_real_probe(client: TestClient):
+def test_network_probe_blocked_connection_is_unreachable(client: TestClient):
+    # conftest's session fixture makes every real probe connect fail (no real network in tests).
     resp = client.post(f"{API_PREFIX}/network/probe", json={"target": "https://example.com"})
     assert resp.status_code == 200
     result = ProbeResult.model_validate(resp.json())
     assert result.reachable is False
-    assert "not implemented" in (result.error or "").lower()
+    assert "disabled in tests" in (result.error or "")
 
 
 def test_admin_prewarm_stub_returns_valid_shape(client: TestClient):
