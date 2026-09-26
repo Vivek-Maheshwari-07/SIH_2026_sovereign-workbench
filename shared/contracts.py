@@ -57,7 +57,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-CONTRACT_VERSION = "1.0.0"
+CONTRACT_VERSION = "1.0.1"
 API_PREFIX = "/api"
 
 ERROR_CODES = {
@@ -270,7 +270,12 @@ class Connection(BaseModel):
     local: str                     # "ip:port"
     remote: str                    # "ip:port"
     status: str                    # psutil status, e.g. ESTABLISHED
-    external: bool                 # True if remote is not loopback / not local subnet
+    external: bool                 # True if remote is not loopback. Strict mode for the laptop demo:
+                                   # only loopback is local; LAN addresses count as external.
+    # 1.0.1 (optional):
+    group: Optional[Literal["established", "attempt"]] = None  # attempt = SYN_SENT/SYN_RECV, never connected
+    origin: Optional[Literal["ours", "other_app", "probe"]] = None  # ours = backend/Ollama/UI/Docker/WSL
+    first_seen: Optional[datetime] = None  # when the monitor first saw this (pid, remote, group)
 
 
 class NetworkStatus(BaseModel):
@@ -280,6 +285,12 @@ class NetworkStatus(BaseModel):
     total_connections: int
     firewall_outbound_blocked: Optional[bool] = None  # None = could not read
     connections: list[Connection]  # non-listening, non-loopback only
+    # 1.0.1 (optional). external_seen_since_start counts origin "ours" + group "established" only.
+    since: Optional[datetime] = None               # monitor start = start of the *_since_start counts
+    attempts_since_start: Optional[int] = None     # unique attempts (not probe), never counted as leaks
+    other_apps_since_start: Optional[int] = None   # unique established connections of other apps (info only)
+    probe_since_start: Optional[int] = None        # unique connections made by /network/probe
+    monitor_error: Optional[str] = None            # last psutil error; None = monitor healthy
 
 
 class ProbeRequest(BaseModel):

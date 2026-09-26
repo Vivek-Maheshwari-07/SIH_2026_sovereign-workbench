@@ -14,7 +14,7 @@ Per socket:
     did, e.g. blocked by the firewall. Shown, never counted as a leak.
   - origin "ours": the backend (this pid and its children), Ollama,
     Streamlit, Docker Desktop / WSL. These are the sovereign proof.
-    origin "other": any other app on the laptop, shown for information.
+    origin "other_app": any other app on the laptop, shown for information.
     origin "probe": the backend's own /api/network/probe connection to the
     probe target (while the probe runs, plus PROBE_GRACE_S for TIME_WAIT).
 
@@ -50,7 +50,7 @@ from backend.settings import settings
 from shared.contracts import Connection, NetworkStatus
 
 Group = Literal["established", "attempt"]
-Origin = Literal["ours", "other", "probe"]
+Origin = Literal["ours", "other_app", "probe"]   # values match shared.contracts.Connection.origin
 
 ATTEMPT_STATES = frozenset({psutil.CONN_SYN_SENT, psutil.CONN_SYN_RECV})
 MIN_POLL_S = 0.2                 # floor for WB_NET_POLL_S so a typo can't spin a core
@@ -66,7 +66,7 @@ OUR_PROCESS_NAMES = frozenset({
     "wsl", "wslhost", "wslservice", "wslrelay", "vmmem", "vmmemwsl",
 })
 _PYTHON_NAMES = frozenset({"python", "pythonw", "python3"})
-ORIGIN_LABELS: dict[str, str] = {"ours": "ours", "other": "other app", "probe": "probe"}
+ORIGIN_LABELS: dict[str, str] = {"ours": "ours", "other_app": "other app", "probe": "probe"}
 
 NAME_ACCESS_DENIED = "<access denied>"
 NAME_GONE = "<process gone>"
@@ -260,7 +260,7 @@ class NetMonitor:
             return "probe"
         if ours_by_name or pid in our_pids:
             return "ours"
-        return "other"
+        return "other_app"
 
     # ------------------------------------------------------------ polling
     def poll_once(self) -> None:
@@ -298,18 +298,21 @@ class NetMonitor:
             name, ours_by_name = self._describe(pid)
             group = state_group(conn.status)
             origin = self._origin(pid, ours_by_name, ip, our_pids, probe_ips)
-            current.append(Connection(
-                pid=pid, process=f"{name} [{ORIGIN_LABELS[origin]}]", local=_fmt_local(conn),
-                remote=_fmt(ip, port), status=conn.status, external=True))
             if origin == "ours" and group == "established":
                 current_leaks += 1
             key = (pid, ip, port, group)
             with self._state_lock:
-                if key in self._seen:
-                    continue
-                seen = SeenConnection(pid, name, ip, port, conn.status, group, origin, now)
-                self._seen[key] = seen
-            new.append(seen)
+                seen = self._seen.get(key)
+                is_new = seen is None
+                if is_new:
+                    seen = SeenConnection(pid, name, ip, port, conn.status, group, origin, now)
+                    self._seen[key] = seen
+            if is_new:
+                new.append(seen)
+            current.append(Connection(
+                pid=pid, process=f"{name} [{ORIGIN_LABELS[origin]}]", local=_fmt_local(conn),
+                remote=_fmt(ip, port), status=conn.status, external=True,
+                group=group, origin=origin, first_seen=seen.first_seen))
 
         self._describe_cache = {pid: v for pid, v in self._describe_cache.items() if pid in live_pids}
         with self._state_lock:
@@ -348,7 +351,7 @@ class NetMonitor:
             return sorted(self._seen.values(), key=lambda s: s.first_seen)
 
     def summary(self) -> dict[str, Any]:
-        """Everything status() can't carry in the contract (see main.py: X-Net-* headers)."""
+        """Counts behind the optional NetworkStatus fields (contract 1.0.1) and the X-Net-* headers."""
         seen = self.seen()
         with self._state_lock:
             error = self._error
@@ -356,21 +359,26 @@ class NetMonitor:
             "since": self.started_at,
             "leaks_since_start": sum(1 for s in seen if s.is_leak),
             "attempts_since_start": sum(1 for s in seen if s.group == "attempt" and s.origin != "probe"),
-            "other_apps_since_start": sum(1 for s in seen if s.origin == "other" and s.group == "established"),
+            "other_apps_since_start": sum(1 for s in seen if s.origin == "other_app" and s.group == "established"),
             "probe_since_start": sum(1 for s in seen if s.origin == "probe"),
             "error": error,
         }
 
     def status(self, firewall_outbound_blocked: Optional[bool]) -> NetworkStatus:
-        leaks = self.summary()["leaks_since_start"]
+        summary = self.summary()
         with self._state_lock:
             return NetworkStatus(
                 checked_at=self._checked_at or datetime.now(timezone.utc),
                 external_count=self._current_leaks,
-                external_seen_since_start=leaks,
+                external_seen_since_start=summary["leaks_since_start"],
                 total_connections=self._total_connections,
                 firewall_outbound_blocked=firewall_outbound_blocked,
                 connections=list(self._current),
+                since=summary["since"],
+                attempts_since_start=summary["attempts_since_start"],
+                other_apps_since_start=summary["other_apps_since_start"],
+                probe_since_start=summary["probe_since_start"],
+                monitor_error=summary["error"],
             )
 
 

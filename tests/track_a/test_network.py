@@ -118,7 +118,13 @@ def test_external_established_counted_once_over_many_polls(caplog):
             mon.poll_once()
     status = mon.status(None)
     assert status.external_seen_since_start == 1 and status.external_count == 1
-    assert status.connections[0].remote == f"{GOOGLE}:443" and status.connections[0].process == "python.exe [ours]"
+    first = status.connections[0]
+    assert first.remote == f"{GOOGLE}:443" and first.process == "python.exe [ours]"
+    assert first.group == "established" and first.origin == "ours" and first.first_seen is not None
+    assert status.since == mon.started_at and status.monitor_error is None
+    assert status.attempts_since_start == 0 and status.other_apps_since_start == 0 and status.probe_since_start == 0
+    mon.poll_once()
+    assert mon.status(None).connections[0].first_seen == first.first_seen     # first-seen time is kept
     records = network_audit()
     assert len(records) == 1 and records[0].ok is False and records[0].detail["origin"] == "ours"
     warnings = [r for r in caplog.records if "New external connection" in r.getMessage()]
@@ -136,8 +142,8 @@ def test_syn_sent_is_an_attempt_not_a_leak():
     mon.poll_once()
     status, summary = mon.status(None), mon.summary()
     assert status.external_seen_since_start == 0 and status.external_count == 0
-    assert summary["attempts_since_start"] == 1
-    assert [c.status for c in status.connections] == ["SYN_SENT"]   # still shown
+    assert summary["attempts_since_start"] == 1 and status.attempts_since_start == 1
+    assert [(c.status, c.group, c.origin) for c in status.connections] == [("SYN_SENT", "attempt", "ours")]
     records = network_audit()
     assert len(records) == 1 and records[0].ok is True and records[0].detail["group"] == "attempt"
 
@@ -157,11 +163,12 @@ def test_probe_connection_is_labelled_probe_and_not_counted():
     mon.begin_probe([GOOGLE])
     mon.poll_once()
     status, summary = mon.status(None), mon.summary()
-    by_remote = {(c.remote, c.status): c.process for c in status.connections}
-    assert by_remote[(f"{GOOGLE}:443", "ESTABLISHED")].endswith("[probe]")
-    assert by_remote[(f"{GOOGLE}:443", "TIME_WAIT")].endswith("[probe]")    # closed probe socket, pid 0
+    by_remote = {(c.remote, c.status): c for c in status.connections}
+    assert by_remote[(f"{GOOGLE}:443", "ESTABLISHED")].process.endswith("[probe]")
+    assert by_remote[(f"{GOOGLE}:443", "TIME_WAIT")].origin == "probe"      # closed probe socket, pid 0
+    assert by_remote[("8.8.8.8:53", "ESTABLISHED")].origin == "ours"
     assert status.external_seen_since_start == 1                            # only 8.8.8.8 is a leak
-    assert summary["probe_since_start"] == 2
+    assert summary["probe_since_start"] == 2 and status.probe_since_start == 2
 
     mon.end_probe([GOOGLE])                                                 # grace period: still probe
     table.append(conn(remote=(GOOGLE, 443), local=("10.0.0.5", 50001)))
@@ -204,7 +211,11 @@ def test_our_processes_vs_other_apps():
     labels = {c.pid: c.process for c in mon.status(None).connections}
     assert all(labels[pid].endswith("[ours]") for pid in (2001, 2002, 2003, 2004, CHILD_PID))
     assert labels[3001] == "python.exe [other app]" and labels[3002] == "chrome.exe [other app]"
-    assert mon.status(None).external_seen_since_start == 5 and mon.summary()["other_apps_since_start"] == 2
+    origins = {c.pid: c.origin for c in mon.status(None).connections}
+    assert {origins[p] for p in (2001, 2002, 2003, 2004, CHILD_PID)} == {"ours"}
+    assert origins[3001] == origins[3002] == "other_app"
+    status = mon.status(None)
+    assert status.external_seen_since_start == 5 and status.other_apps_since_start == 2
 
 
 def test_psutil_error_is_reported_and_monitor_recovers():
@@ -221,11 +232,11 @@ def test_psutil_error_is_reported_and_monitor_recovers():
     mon.poll_once()
     calls["fail"] = True
     mon.poll_once()
-    assert "AccessDenied" in mon.summary()["error"]
+    assert "AccessDenied" in mon.status(None).monitor_error
     assert mon.status(None).external_seen_since_start == 1                  # last good data kept
     calls["fail"] = False
     mon.poll_once()
-    assert mon.summary()["error"] is None
+    assert mon.status(None).monitor_error is None
 
 
 # ---------------------------------------------------------------- monitor thread
@@ -365,10 +376,28 @@ def test_status_endpoint_validates_and_carries_monitor_facts(client, monkeypatch
     main.monitor.poll_once()
     resp = client.get(f"{API_PREFIX}/network/status")
     assert resp.status_code == 200
-    status = NetworkStatus.model_validate(resp.json())
+    body = resp.json()
+    for key in ("since", "attempts_since_start", "other_apps_since_start", "probe_since_start", "monitor_error"):
+        assert key in body                                                  # contract 1.0.1 fields are sent
+    status = NetworkStatus.model_validate(body)
     assert status.firewall_outbound_blocked is True and status.external_seen_since_start == 0
-    assert any(c.remote == "20.9.9.9:443" and c.status == "SYN_SENT" for c in status.connections)
-    assert int(resp.headers["X-Net-Attempts-Since-Start"]) >= 1 and "X-Net-Since" in resp.headers
+    assert any(c.remote == "20.9.9.9:443" and c.group == "attempt" and c.origin == "other_app"
+               and c.first_seen is not None for c in status.connections)
+    assert status.attempts_since_start >= 1 and status.since is not None
+    assert int(resp.headers["X-Net-Attempts-Since-Start"]) == status.attempts_since_start  # headers kept, same facts
+    assert resp.headers["X-Contract-Version"] == "1.0.1"
+
+
+def test_contract_1_0_payload_still_validates():
+    """The 1.0.1 fields are optional: a 1.0.0-shaped payload (e.g. an old mock) still parses."""
+    old = {"checked_at": "2026-09-26T00:00:00Z", "external_count": 0, "external_seen_since_start": 0,
+           "total_connections": 3, "firewall_outbound_blocked": None,
+           "connections": [{"pid": 1, "process": "x", "local": "10.0.0.5:1", "remote": "20.0.0.1:443",
+                            "status": "ESTABLISHED", "external": True}]}
+    status = NetworkStatus.model_validate(old)
+    assert status.since is None and status.monitor_error is None and status.connections[0].origin is None
+    with pytest.raises(ValueError):
+        NetworkStatus.model_validate({**old, "connections": [{**old["connections"][0], "origin": "other"}]})
 
 
 @pytest.mark.parametrize("outcome", ["success", "timeout"])

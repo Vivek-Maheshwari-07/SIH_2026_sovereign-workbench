@@ -286,7 +286,7 @@ async def get_artifact(artifact_id: str):
 
 # ---------------------------------------------------------------- network proof
 def _net_headers(summary: dict) -> dict[str, str]:
-    """Monitor facts NetworkStatus has no field for yet (contract change proposed in A9 notes)."""
+    """Same facts as the optional NetworkStatus fields (contract 1.0.1); kept for older clients."""
     headers = {
         "X-Net-Since": summary["since"].isoformat(),
         "X-Net-Attempts-Since-Start": str(summary["attempts_since_start"]),
