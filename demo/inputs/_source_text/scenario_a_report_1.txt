@@ -1,0 +1,32 @@
+--- Page 1 ---
+STORAGE TANK T-104 ANNUAL INSPECTION REPORT
+Report No.: SDR/INSP/2026/0412
+Date of inspection: 14-09-2026
+Inspector: M. P. Joshi, Level II UT
+Unit: Crude Tank Farm, Unit 11 - Tank T-104 (crude oil, 12,000 m3)
+
+1. Background
+Tank T-104 was taken out of service on 08-09-2026 for its annual inspection. The tank was drained, the manways were opened and a confined space entry was made for internal visual inspection and ultrasonic thickness (UT) survey of the shell, bottom and roof plates. The last inspection in September 2025 reported general corrosion within limits. This report lists the findings and the repair work needed before the tank is returned to service.
+
+2. Wall thickness readings (UT, minimum of grid)
+Location | Nominal (mm) | Measured min (mm) | Loss (%)
+Shell course 1, north | 10.0 | 9.4 | 6
+Shell course 2, north | 8.0 | 6.1 | 24
+Shell course 2, south | 8.0 | 7.6 | 5
+Bottom plate near sump | 8.0 | 6.8 | 15
+Roof plate, centre | 6.0 | 5.7 | 5
+
+3. Findings
+No. | Item | Observation | Severity
+1 | Shell course 2, north side | Wall thinning to 6.1 mm against 8.0 mm nominal (24% loss). Below 80% of nominal thickness. Plate replacement by welding needed. | High
+2 | Bottom plate near sump | Pitting up to 1.2 mm deep. About 150 mm sludge layer. H2S of 18 ppm measured at manway M1 when the sludge was disturbed. | High
+3 | Inlet nozzle N2 and mixer MX-104 | No spade blind fitted on N2 during entry. Mixer motor breaker was switched off but not locked or tagged. | Medium
+4 | Confined space entry permit | No gas test entries on the permit after 11:00. Attendant left the manway for about 10 minutes. | Medium
+5 | Roof handrail and stairway | Surface rust and coating breakdown. No loss of section. | Low
+
+--- Page 2 ---
+4. Recommendation
+(a) Replace the two thinned plates of shell course 2, north side, before the tank is returned to service. Welding must be done under a hot work permit after the tank is cleaned, gas freed and gas tested, with a fire watch in place. (b) Remove all sludge before any further entry. Use continuous H2S monitoring and breathing apparatus if H2S is above the permissible limit. (c) Fit a spade blind on nozzle N2 and apply lockout/tagout to the mixer MX-104 motor before the next entry. (d) Brief all entrants and attendants on the confined space entry procedure. (e) Re-inspect the bottom plate pits at the next shutdown and repaint the roof handrail.
+Estimated cost: Rs 4,50,000 (plate replacement Rs 3,20,000; sludge removal Rs 90,000; blinds and coating Rs 40,000).
+
+Signed: M. P. Joshi (Inspector, Level II UT)    Reviewed: K. S. Iyer (Section Head, Inspection)
