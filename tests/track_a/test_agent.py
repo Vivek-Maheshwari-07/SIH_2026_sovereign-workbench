@@ -399,7 +399,7 @@ def test_kb_hits_below_minimum_are_ignored(monkeypatch):
     ctx = agent_tools.ToolContext(task_id="t", emit=lambda *a, **k: None, add_artifact=lambda a: None)
     outcome = agent_tools.search_knowledge(ctx, "wall thickness")
     assert "kb_1: SOP-INSP-012.pdf p.4" in outcome.summary and "SOP-ADM-001" not in outcome.summary
-    assert "1 weaker hit(s) below 0.50 ignored" in outcome.summary
+    assert "1 weaker hit(s) below 0.57 ignored" in outcome.summary
     assert list(ctx.scratchpad.kb_hits) == ["kb_1"]
 
     monkeypatch.setattr(agent_tools.knowledge, "search", lambda query, top_k=4: [WEAK])
@@ -763,7 +763,7 @@ def test_tag_types_checked_against_prefix_table():
         PidTag(tag="FIC-101", equipment_type="Instrument"),      # generic instrument is fine
         PidTag(tag="PT-102", equipment_type="Pressure transmitter"),
         PidTag(tag="PSV-7", equipment_type="Relief valve"),
-        PidTag(tag="XV-201", equipment_type="Valve"),            # unknown prefix: keep the model's answer
+        PidTag(tag="XV-201", equipment_type="Valve"),            # any "valve" wording agrees with XV
         PidTag(tag="E-401", equipment_type="Heat exchanger"),
         PidTag(tag="LIC-3", equipment_type="Pump"),              # wrong -> Level indicating controller
     ])
@@ -773,6 +773,36 @@ def test_tag_types_checked_against_prefix_table():
         "Level indicating controller"]
     assert len([w for w in warns if "prefix" in w]) == 3
     assert agent_tools.tag_prefix(" fic-101 ") == "FIC" and agent_tools.tag_prefix("101") == ""
+
+
+def test_kb_hit_just_below_new_minimum_is_ignored(monkeypatch):
+    """0.544 was a real wrong CUI -> hot-work match; it passed the old 0.50 cut-off, not 0.57."""
+    assert agent_tools.MIN_KB_SCORE == 0.57
+    ctx = agent_tools.ToolContext(task_id="t", emit=lambda *a, **k: None, add_artifact=lambda a: None)
+    cui = KBHit(text="Hot work near tanks ...", source="nsw_hot_work_petroleum.pdf", page=56, score=0.544)
+    monkeypatch.setattr(agent_tools.knowledge, "search", lambda query, top_k=4: [HOT_WORK, cui])
+    outcome = agent_tools.search_knowledge(ctx, "corrosion under insulation")
+    assert "nsw_hot_work_petroleum" not in outcome.summary and "1 weaker hit(s) below 0.57" in outcome.summary
+
+
+@pytest.mark.parametrize("prefix", ["XV", "SDV", "HV", "LV", "TV", "FV", "PV"])
+def test_valve_prefixes_are_valves(prefix):
+    canonical, accepted = agent_tools.TAG_TYPE_RULES[prefix]
+    assert canonical.endswith("valve") and accepted == ("valve",)
+
+
+def test_pid_tags_xv_is_valve_and_t_is_tank():
+    ctx = agent_tools.ToolContext(task_id="t", emit=lambda *a, **k: None, add_artifact=lambda a: None)
+    tags = PidTagList(tags=[
+        PidTag(tag="XV-201", equipment_type="Instrument"),       # wrong -> Shutdown valve
+        PidTag(tag="XV-202", equipment_type="On/off valve"),     # valve wording kept
+        PidTag(tag="T-201", equipment_type="Vessel"),            # wrong -> Tank
+        PidTag(tag="PV-7", equipment_type="Pressure transmitter"),  # not a valve -> Pressure control valve
+    ])
+    agent_tools.check_tag_types(ctx, tags)
+    assert [t.equipment_type for t in tags.tags] == [
+        "Shutdown valve", "On/off valve", "Tank", "Pressure control valve"]
+    assert "Tank," in agent_tools._PID_SYSTEM
 
 
 def test_auto_added_sop_references_are_labelled_in_word(monkeypatch, store, report_file_id):

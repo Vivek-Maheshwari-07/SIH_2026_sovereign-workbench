@@ -40,7 +40,7 @@ from shared.contracts import (
 TOOL_RESULT_MAX_CHARS = 1500        # longest tool result text sent back to the model
 DOC_EXCERPT_CHARS = 700             # document excerpt shown to the model by read_document
 KB_SNIPPET_CHARS = 200              # per-hit snippet shown by search_knowledge
-MIN_KB_SCORE = 0.50                 # hits below this are never shown or cited
+MIN_KB_SCORE = 0.57                 # hits below this are never shown or cited (a CUI query hit unrelated hot-work pages at 0.544)
 DOC_PROMPT_MAX_CHARS = 14000        # document text given to draft_approval_note (fits WB_NUM_CTX 8192)
 MAX_TOP_K = 10
 MAX_FILLED_SOP_REFS = 3             # retrieved passages cited when the model cites none
@@ -59,11 +59,11 @@ TAG_TYPE_RULES: dict[str, tuple[str, tuple[str, ...]]] = {
     "K": ("Compressor", ("compressor",)),
     "FT": ("Flow transmitter", ("flow", "transmitter") + _INSTRUMENT),
     "FIC": ("Flow indicating controller", ("flow", "controller") + _INSTRUMENT),
-    "FV": ("Flow control valve", ("flow", "valve")),
+    "FV": ("Flow control valve", ("valve",)),
     "PT": ("Pressure transmitter", ("pressure", "transmitter") + _INSTRUMENT),
     "PI": ("Pressure indicator", ("pressure", "indicator", "gauge") + _INSTRUMENT),
     "PIC": ("Pressure indicating controller", ("pressure", "controller") + _INSTRUMENT),
-    "PV": ("Pressure control valve", ("pressure", "valve")),
+    "PV": ("Pressure control valve", ("valve",)),
     "LT": ("Level transmitter", ("level", "transmitter") + _INSTRUMENT),
     "LI": ("Level indicator", ("level", "indicator", "gauge") + _INSTRUMENT),
     "LIC": ("Level indicating controller", ("level", "controller") + _INSTRUMENT),
@@ -72,6 +72,11 @@ TAG_TYPE_RULES: dict[str, tuple[str, tuple[str, ...]]] = {
     "TIC": ("Temperature indicating controller", ("temperature", "controller") + _INSTRUMENT),
     "PSV": ("Pressure safety valve", ("safety", "relief", "psv")),
     "PRV": ("Pressure relief valve", ("relief", "safety", "prv")),
+    "LV": ("Level control valve", ("valve",)),
+    "TV": ("Temperature control valve", ("valve",)),
+    "XV": ("Shutdown valve", ("valve",)),
+    "SDV": ("Shutdown valve", ("valve",)),
+    "HV": ("Hand valve", ("valve",)),
 }
 _TAG_PREFIX_RE = re.compile(r"\s*([A-Za-z]+)")
 
@@ -300,7 +305,7 @@ def draft_approval_note(ctx: ToolContext, doc_id: str, kb_ref_ids: Optional[list
 _PID_SYSTEM = """You list every equipment and instrument tag seen on a P&ID drawing, as JSON.
 The drawing was read in tiles; each tile's text is marked '--- Tile N (name) ---'.
 For each tag give: tag (exactly as written, e.g. P-101A), equipment_type (Pump, Valve, Vessel,
-Instrument, Heat exchanger, Line or Other), a short description if the text gives one, and tile = the tile number N.
+Tank, Instrument, Heat exchanger, Line or Other), a short description if the text gives one, and tile = the tile number N.
 List a tag once per tile where it appears. Do not invent tags that are not in the text."""
 
 

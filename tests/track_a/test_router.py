@@ -102,6 +102,12 @@ def _best_similarity(message: str) -> tuple[float, str, str]:
 
 
 @pytest.fixture(autouse=True)
+def _temp_workspace(tmp_path, monkeypatch):
+    """Uploaded test images go to a temp workspace, never the real workspace/."""
+    monkeypatch.setattr(settings, "WB_WORKSPACE_DIR", tmp_path / "workspace")
+
+
+@pytest.fixture(autouse=True)
 def _reset_example_cache():
     router_module._example_vectors_cache = None
     yield

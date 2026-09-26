@@ -57,14 +57,26 @@ def scripted_agent(handle) -> None:
 
 
 @pytest.fixture(scope="module")
-def client():
+def client(tmp_path_factory):
+    """App with every data dir (Chroma, KB, cache, workspace) pointed at an empty temp dir, never the real ones."""
     from backend import agent
     from backend.main import app
+    from backend.settings import settings
+    from backend.tools import knowledge
 
+    data_root = tmp_path_factory.mktemp("api_data")
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(agent, "run", scripted_agent)
-        with TestClient(app) as c:
-            yield c
+        mp.setattr(settings, "WB_CHROMA_DIR", data_root / "chroma")
+        mp.setattr(settings, "WB_KB_DIR", data_root / "kb")
+        mp.setattr(settings, "WB_CACHE_DIR", data_root / "cache")
+        mp.setattr(settings, "WB_WORKSPACE_DIR", data_root / "workspace")
+        knowledge.reset_client()
+        try:
+            with TestClient(app) as c:
+                yield c
+        finally:
+            knowledge.reset_client()
 
 
 def _wait_for_task_done(client: TestClient, task_id: str, timeout_s: float = 15.0) -> list:
@@ -136,7 +148,7 @@ def test_kb_stats_stub_returns_valid_shape(client: TestClient):
     KBStats.model_validate(resp.json())
 
 
-def test_kb_search_stub_returns_empty_hits(client: TestClient):
+def test_kb_search_on_empty_kb_returns_empty_hits(client: TestClient):
     resp = client.post(f"{API_PREFIX}/kb/search", json={"query": "hot work permit"})
     assert resp.status_code == 200
     result = KBSearchResponse.model_validate(resp.json())

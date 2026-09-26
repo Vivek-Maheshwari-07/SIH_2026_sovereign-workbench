@@ -7,6 +7,8 @@ is unreachable and marked slow.
 from __future__ import annotations
 
 import io
+import json
+import re
 import time
 from pathlib import Path
 
@@ -360,3 +362,130 @@ def test_live_vision_call_on_one_pid_tile_returns_text():
 
     assert text.strip() != ""
     print(f"\nLive vision call on tile {tile_name!r} took {duration_s:.2f}s, returned {len(text)} chars")
+
+
+# ---------------------------------------------------------------- deskew
+def _document_page() -> Image.Image:
+    """A page-like image: 22 lines of body text on white, like a report page."""
+    image = Image.new("RGB", (1240, 1754), color="white")
+    draw = ImageDraw.Draw(image)
+    font = _font(26)
+    for row in range(22):
+        draw.text((90, 120 + row * 64), f"{row + 1}. Shell course {row % 4 + 1} north side wall 6.{row % 9} mm "
+                                        f"against 8.0 mm nominal, severity High", fill="black", font=font)
+    return image
+
+
+@pytest.mark.parametrize("true_angle", [1.5, -1.0])
+def test_detect_skew_finds_rotation_within_tolerance(true_angle):
+    skewed = _document_page().rotate(true_angle, resample=Image.BICUBIC, expand=True, fillcolor="white")
+    assert documents.detect_skew(skewed) == pytest.approx(true_angle, abs=0.3)
+
+
+def test_deskew_leaves_straight_page_unrotated():
+    page = _document_page()
+    straight, angle = documents._deskew(page)
+    assert abs(angle) < documents.DESKEW_MIN_ANGLE
+    assert straight is page  # not rotated at all, not even by a tiny angle
+
+
+def test_deskew_rotates_skewed_page_and_angle_is_recorded(tmp_path):
+    skewed = _text_image(SCANNED_TEXTS[0]).rotate(2.0, resample=Image.BICUBIC, expand=True, fillcolor="white")
+    straight, angle = documents._deskew(skewed)
+    assert angle == pytest.approx(2.0, abs=0.3) and straight is not skewed
+    assert documents.detect_skew(straight) == pytest.approx(0.0, abs=0.3)
+
+    path = tmp_path / "skewed.png"
+    skewed.save(path)
+    page = extract(path).pages[0]
+    assert page.method == "ocr" and page.deskew_angle == pytest.approx(2.0, abs=0.3)
+
+
+def test_cache_key_includes_deskew_setting(tmp_path, monkeypatch):
+    file_bytes = b"same bytes"
+    with_deskew = documents._cache_key(file_bytes, kind="auto")
+    monkeypatch.setattr(documents, "DESKEW_ENABLED", False)
+    assert documents._cache_key(file_bytes, kind="auto") != with_deskew
+
+
+def _pre_deskew_cache_key(file_bytes: bytes, kind: str) -> str:
+    """The cache key exactly as it was built before deskew (cache version 1)."""
+    import hashlib
+
+    hasher = hashlib.sha256()
+    hasher.update(file_bytes)
+    for part in ("1", kind, str(settings.WB_OCR_DPI), str(settings.WB_VISION_MAX_PX), documents._vision_model_name()):
+        hasher.update(b"\x00")
+        hasher.update(part.encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def test_old_cache_made_without_deskew_is_not_reused(tmp_path):
+    pdf_path = tmp_path / "scanned.pdf"
+    _make_scanned_pdf(pdf_path, [SCANNED_TEXTS[0]])
+    old_key = _pre_deskew_cache_key(pdf_path.read_bytes(), "auto")
+    stale = {"pages": [{"page": 1, "text": "STALE OCR WITHOUT DESKEW", "method": "ocr", "ocr_confidence": 90.0}]}
+    (documents._cache_dir() / f"{old_key}.json").write_text(json.dumps(stale), encoding="utf-8")
+
+    result = extract(pdf_path)
+
+    assert result.from_cache is False
+    assert "STALE" not in result.pages[0].text and result.pages[0].deskew_angle is not None
+
+
+# ---------------------------------------------------------------- live: B6 scanned demo reports
+_DEMO_INPUTS = Path(__file__).resolve().parents[2] / "demo" / "inputs"
+
+# Key values per page, from demo/expected.md (findings, background, cost). Numbers that appear ONLY
+# inside the ruled thickness tables are left out: Tesseract drops those cells (docs/known_issues.md).
+# That includes 6.8 mm (report 1 bottom plate), which expected.md lists as a "should".
+_KEY_VALUES = {
+    "scenario_a_report_1": {
+        1: ["6.1 mm", "8.0 mm", "24%", "1.2 mm", "18 ppm"],
+        2: ["Rs 4,50,000", "3,20,000", "90,000", "40,000"],
+    },
+    "scenario_a_report_2": {
+        1: ["5.20 mm", "7.11 mm", "27%", "12 ppm", "5.90 mm", "17%", "6.10 mm", "14%", "4.80 mm", "0.38 mm"],
+        2: ["Rs 2,85,000", "1,95,000", "55,000", "35,000"],
+    },
+}
+
+
+def _normalize(text: str) -> str:
+    """expected.md matching rules: case-insensitive, extra spaces ignored (also OCR's 'Rs 90, 000')."""
+    text = re.sub(r"(?<=\d)\s*([,.])\s*(?=\d)", r"\1", text.lower())  # only inside numbers
+    text = re.sub(r"(?<=\d)\s+%", "%", text)
+    return re.sub(r"\s+", " ", text)
+
+
+def _has_value(text: str, value: str) -> bool:
+    return re.search(rf"(?<![\d.,]){re.escape(_normalize(value))}(?!\d)", _normalize(text)) is not None
+
+
+def _answer_key_pages(name: str) -> dict[int, str]:
+    text = (_DEMO_INPUTS / "_source_text" / f"{name}.txt").read_text(encoding="utf-8")
+    parts = re.split(r"^--- Page (\d+) ---$", text, flags=re.MULTILINE)
+    return {int(parts[i]): parts[i + 1] for i in range(1, len(parts), 2)}
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("name", ["scenario_a_report_1", "scenario_a_report_2"])
+def test_demo_report_ocr_keeps_every_severity_and_key_value(name):
+    pdf_path = _DEMO_INPUTS / f"{name}.pdf"
+    if not pdf_path.exists():
+        pytest.skip(f"B6 demo data not present: {pdf_path}")
+    key_pages = _answer_key_pages(name)
+
+    result = extract(pdf_path)
+
+    got = {p.page: p for p in result.pages}
+    assert sorted(got) == sorted(key_pages)
+    for number, key_text in key_pages.items():
+        page = got[number]
+        assert page.method == "ocr" and page.deskew_angle is not None
+        for word in ("High", "Medium", "Low"):
+            expected = len(re.findall(rf"\b{word}\b", key_text))
+            found = len(re.findall(rf"\b{word}\b", page.text))
+            assert found == expected, f"page {number}: {word!r} expected {expected}, found {found}"
+        missing = [v for v in _KEY_VALUES[name][number] if not _has_value(page.text, v)]
+        assert missing == [], f"page {number}: key values not found: {missing}"

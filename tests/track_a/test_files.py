@@ -22,6 +22,12 @@ from backend.tools.files import (
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
+@pytest.fixture(autouse=True)
+def _temp_workspace(tmp_path, monkeypatch):
+    """write_file/read_file/safe_path use a temp workspace, never the real workspace/."""
+    monkeypatch.setattr(settings, "WB_WORKSPACE_DIR", tmp_path / "workspace")
+
+
 def _workspace_root() -> Path:
     root = settings.WB_WORKSPACE_DIR
     return (root if root.is_absolute() else _REPO_ROOT / root).resolve()

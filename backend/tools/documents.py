@@ -1,7 +1,8 @@
 """
 Document extraction for Track A. Per page, in order:
   1. PDF page has a real text layer (>= MIN_TEXT_LAYER_CHARS)  -> use it directly.
-  2. No text layer                                             -> render at WB_OCR_DPI, run Tesseract.
+  2. No text layer                                             -> render at WB_OCR_DPI, deskew
+                                                                   (see _deskew), run Tesseract.
   3. OCR came out poor (see _is_ocr_poor)                      -> send the page image to the vision model.
   4. kind="pid"                                                -> skip 1-3 entirely; cut the image
                                                                    into 4 overlapping tiles and send
@@ -17,7 +18,7 @@ Non-image, non-PDF text-bearing types skip the OCR/vision pipeline entirely
 
 Results are cached under WB_CACHE_DIR, keyed by a sha256 of the file bytes
 plus every setting that changes the output (dpi, max px, vision model id,
-kind), so re-extracting the same file with the same settings is instant and
+kind, deskew on/off), so re-extracting the same file with the same settings is instant and
 touches neither Tesseract nor Ollama.
 
 PageResult/ExtractResult are internal dataclasses, not shared.contracts
@@ -38,7 +39,7 @@ import docx
 import openpyxl
 import pymupdf
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageOps
 
 from backend.llm_client import LLMError, chat
 from backend.registry import registry
@@ -72,7 +73,23 @@ OCR_MIN_WORD_COUNT = 3
 PID_TILE_OVERLAP = 0.15
 PID_TILE_NAMES = ("top-left", "top-right", "bottom-left", "bottom-right")
 
-_CACHE_VERSION = 1  # bump if the cached JSON shape changes incompatibly
+# Deskew before OCR. Tesseract silently drops table cells on scans rotated by
+# only 0.6-1.5 degrees while still reporting ~90 mean confidence (so the
+# vision fallback never kicks in); straightening the page first fixes that.
+# The angle is found by a projection-profile search: rotate a small binarized
+# copy through candidate angles and keep the one whose row-ink profile is the
+# sharpest (text lines line up with pixel rows).
+DESKEW_ENABLED = True
+DESKEW_MAX_ANGLE = 5.0        # degrees searched either side of straight
+DESKEW_COARSE_STEP = 0.5
+DESKEW_FINE_STEP = 0.1        # searched within +/- one coarse step of the coarse best
+DESKEW_MIN_ANGLE = 0.1        # smaller detected angles are left alone
+DESKEW_DETECT_MAX_PX = 1200   # longest side of the copy the angle is detected on
+DESKEW_INK_THRESHOLD = 128    # grey level below which a pixel counts as ink
+
+# Bump if the cached JSON shape or the extraction pipeline changes in a way
+# that makes old cached results wrong. 2 = deskew before OCR (A8c).
+_CACHE_VERSION = 2
 
 
 class DocumentExtractionError(Exception):
@@ -98,6 +115,7 @@ class PageResult:
     method: ExtractMethod
     ocr_confidence: Optional[float] = None
     tile: Optional[str] = None  # set only for kind="pid" results
+    deskew_angle: Optional[float] = None  # detected skew in degrees (CCW +); set when the page went through OCR
     error: Optional[str] = None  # set if this page/tile failed; text is best-effort
 
 
@@ -186,11 +204,70 @@ def _ocr_page(image: Image.Image) -> tuple[str, float, int]:
     return " ".join(words), mean_confidence, len(words)
 
 
+def _ink_mask(image: Image.Image) -> Image.Image:
+    """Small greyscale copy with ink = 255 and paper = 0 (so rotation fill adds no ink)."""
+    grey = image.convert("L")
+    longest = max(grey.size)
+    if longest > DESKEW_DETECT_MAX_PX:
+        scale = DESKEW_DETECT_MAX_PX / longest
+        grey = grey.resize((max(1, round(grey.width * scale)), max(1, round(grey.height * scale))), Image.BILINEAR)
+    return grey.point(lambda v: 255 if v < DESKEW_INK_THRESHOLD else 0)
+
+
+def _profile_score(mask: Image.Image, angle: float) -> float:
+    """Sharpness of the row-ink profile after rotating by -angle: sum of squared row sums."""
+    rotated = mask.rotate(-angle, resample=Image.NEAREST, expand=True, fillcolor=0)
+    row_means = rotated.convert("F").resize((1, rotated.height), Image.BOX)
+    width = rotated.width
+    return sum((row_means.getpixel((0, y)) * width) ** 2 for y in range(rotated.height))
+
+
+def _best_angle(mask: Image.Image, candidates: list[float]) -> float:
+    # Candidates nearest 0 first, and a strict ">" below, so ties (e.g. a blank page) resolve to straight.
+    best_angle, best_score = 0.0, float("-inf")
+    for angle in sorted(candidates, key=abs):
+        score = _profile_score(mask, angle)
+        if score > best_score:
+            best_angle, best_score = angle, score
+    return best_angle
+
+
+def _frange(start: float, stop: float, step: float) -> list[float]:
+    count = round((stop - start) / step)
+    return [round(start + i * step, 4) for i in range(count + 1)]
+
+
+def detect_skew(image: Image.Image) -> float:
+    """Skew of the page in degrees, counter-clockwise positive (PIL's rotate convention)."""
+    mask = _ink_mask(image)
+    coarse = _best_angle(mask, _frange(-DESKEW_MAX_ANGLE, DESKEW_MAX_ANGLE, DESKEW_COARSE_STEP))
+    fine = _frange(coarse - DESKEW_COARSE_STEP, coarse + DESKEW_COARSE_STEP, DESKEW_FINE_STEP)
+    return _best_angle(mask, fine)
+
+
+def _deskew(image: Image.Image) -> tuple[Image.Image, float]:
+    """Returns (straightened image, detected angle). Tiny angles are detected but not rotated."""
+    angle = detect_skew(image)
+    if abs(angle) < DESKEW_MIN_ANGLE:
+        return image, angle
+    straight = image.convert("RGB").rotate(-angle, resample=Image.BICUBIC, expand=True, fillcolor="white")
+    return straight, angle
+
+
 def _is_ocr_poor(mean_confidence: float, word_count: int) -> bool:
     return word_count < OCR_MIN_WORD_COUNT or mean_confidence < OCR_MIN_MEAN_CONFIDENCE
 
 
 def _ocr_then_vision(image: Image.Image, page_number: int) -> PageResult:
+    angle: Optional[float] = None
+    if DESKEW_ENABLED:
+        image, angle = _deskew(image)
+    result = _ocr_then_vision_straight(image, page_number)
+    result.deskew_angle = angle
+    return result
+
+
+def _ocr_then_vision_straight(image: Image.Image, page_number: int) -> PageResult:
     try:
         text, mean_conf, word_count = _ocr_page(image)
         ocr_failed = False
@@ -274,7 +351,9 @@ def _cache_dir() -> Path:
 def _cache_key(file_bytes: bytes, *, kind: str) -> str:
     hasher = hashlib.sha256()
     hasher.update(file_bytes)
-    for part in (str(_CACHE_VERSION), kind, str(settings.WB_OCR_DPI), str(settings.WB_VISION_MAX_PX), _vision_model_name()):
+    parts = (str(_CACHE_VERSION), kind, str(settings.WB_OCR_DPI), str(settings.WB_VISION_MAX_PX),
+             _vision_model_name(), f"deskew={DESKEW_ENABLED}")
+    for part in parts:
         hasher.update(b"\x00")
         hasher.update(part.encode("utf-8"))
     return hasher.hexdigest()
