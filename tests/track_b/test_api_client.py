@@ -291,3 +291,19 @@ def test_live_bad_upload(live_client):
 
 def test_live_network_status(live_client):
     assert live_client.network_status().ok
+
+
+def test_route_and_kb_search_use_model_timeout():
+    from ui.config import MODEL_TIMEOUT_S
+    timeouts = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        timeouts.append(req.extensions["timeout"]["read"])
+        return httpx.Response(500, json=api_error_json("INTERNAL"), headers=HDR)
+
+    client = make_client(handler)
+    client.route(RouteRequest(message="x"))
+    client.kb_search(KBSearchRequest(query="q"))
+    client.kb_stats()
+    assert MODEL_TIMEOUT_S == 30.0
+    assert timeouts == [MODEL_TIMEOUT_S, MODEL_TIMEOUT_S, DEFAULT_TIMEOUT_S]

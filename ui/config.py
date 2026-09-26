@@ -6,13 +6,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from annotated_types import MaxLen
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from shared.contracts import TaskCreate
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Client timeouts (seconds). No .env key exists for these; values come from the B2 ticket.
 DEFAULT_TIMEOUT_S = 10.0
+MODEL_TIMEOUT_S = 30.0  # /api/route and /api/kb/search (may load a cold model)
 LONG_TIMEOUT_S = 60.0   # uploads and /api/admin/prewarm
+
+HEALTH_REFRESH_S = 5.0  # sidebar health lights refresh
+# Upload types the backend accepts: must match ERROR_CODES["UNSUPPORTED_FILE"] in shared/contracts.py.
+ALLOWED_UPLOAD_TYPES = ["pdf", "png", "jpg", "jpeg", "txt", "md", "py", "csv", "xlsx", "docx"]
+# TaskCreate.message max_length, read from the contract so the chat box can never exceed it.
+MAX_MESSAGE_CHARS = next(m.max_length for m in TaskCreate.model_fields["message"].metadata if isinstance(m, MaxLen))
 
 
 class UISettings(BaseSettings):

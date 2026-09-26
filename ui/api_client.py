@@ -53,7 +53,7 @@ from shared.contracts import (
     TaskCreated,
     TaskState,
 )
-from ui.config import DEFAULT_TIMEOUT_S, LONG_TIMEOUT_S, settings
+from ui.config import DEFAULT_TIMEOUT_S, LONG_TIMEOUT_S, MODEL_TIMEOUT_S, settings
 
 T = TypeVar("T")
 
@@ -191,7 +191,8 @@ class ApiClient:
                           files={"file": (filename, content, mime_type)})
 
     def route(self, request: RouteRequest) -> ApiResult[RouteDecision]:
-        return self._json("POST", "/route", RouteDecision, json=request.model_dump(mode="json"))
+        return self._json("POST", "/route", RouteDecision, timeout=MODEL_TIMEOUT_S,
+                          json=request.model_dump(mode="json"))
 
     # ------------------------------------------------------------ tasks
     def create_task(self, request: TaskCreate) -> ApiResult[TaskCreated]:
@@ -235,7 +236,8 @@ class ApiClient:
         return self._json("GET", "/kb/stats", KBStats)
 
     def kb_search(self, request: KBSearchRequest) -> ApiResult[KBSearchResponse]:
-        return self._json("POST", "/kb/search", KBSearchResponse, json=request.model_dump(mode="json"))
+        return self._json("POST", "/kb/search", KBSearchResponse, timeout=MODEL_TIMEOUT_S,
+                          json=request.model_dump(mode="json"))
 
     def audit(self, task_id: Optional[str] = None, limit: int = 100) -> ApiResult[list[AuditRecord]]:
         params: dict[str, Any] = {"limit": limit}
