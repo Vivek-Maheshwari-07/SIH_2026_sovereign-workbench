@@ -1,5 +1,6 @@
 """
-B5: deliverables tray. One entry per artifact: type, name, size, Download button, preview.
+B5: deliverables tray. One entry per artifact: orange type tag, name, size, one-line summary,
+the orange Download button (the only filled orange button) and a preview.
 Bytes are fetched once through the API client and cached in session state (with the parsed
 preview), so the 1 s refresh during a job never downloads or parses a file twice.
 """
@@ -94,10 +95,8 @@ def show_preview(art: Artifact, entry: CachedFile) -> None:
         return
     preview = entry.preview
     if art.kind == ArtifactKind.DOCX:
-        if art.preview:
-            st.caption(art.preview)
         for para in preview or []:
-            st.markdown(f"<p style='font-size:13px;margin:0 0 6px 0'>{esc(para)}</p>", unsafe_allow_html=True)
+            st.markdown(f"<p style='font-size:14px;margin:0 0 6px 0'>{esc(para)}</p>", unsafe_allow_html=True)
     elif art.kind == ArtifactKind.XLSX:
         st.caption(f"First {min(len(preview), XLSX_ROWS)} rows")
         st.dataframe(preview, hide_index=True, width="stretch", height=260)
@@ -111,10 +110,22 @@ def show_preview(art: Artifact, entry: CachedFile) -> None:
         st.caption(art.preview or "No preview for this file type.")
 
 
+def summary_line(art: Artifact) -> str:
+    """One line under the file name: the backend's preview text, first line only."""
+    text = (art.preview or "").strip()
+    return text.splitlines()[0] if text else ""
+
+
+def file_html(art: Artifact) -> str:
+    summary = summary_line(art)
+    sum_html = f'<span class="sum" title="{esc(summary)}">{esc(summary)}</span>' if summary else ""
+    return (f'<div class="wb-file"><span class="kind">{esc(art.kind.value.upper())}</span>'
+            f'<span class="name">{esc(art.filename)}</span>'
+            f'<span class="wb-meta wb-num">{human_size(art.size_bytes)}</span>{sum_html}</div>')
+
+
 def entry_row(art: Artifact, first: bool) -> None:
-    st.markdown(f'<div class="wb-file"><span class="kind">{esc(art.kind.value.upper())}</span>'
-                f'<span class="name">{esc(art.filename)}</span>'
-                f'<span class="wb-meta wb-num">{human_size(art.size_bytes)}</span></div>', unsafe_allow_html=True)
+    st.markdown(file_html(art), unsafe_allow_html=True)
     entry = load(art)
     if entry.file is None:
         st.warning(messages.friendly(f"Could not fetch {art.filename} from the backend", entry.error)

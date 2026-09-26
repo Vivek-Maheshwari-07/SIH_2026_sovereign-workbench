@@ -27,8 +27,7 @@ def badge_html(decision: Optional[RouteDecision]) -> str:
         '<table>'
         f'<tr><td>Task type</td><td>{esc(decision.task_type.value)}</td></tr>'
         f'<tr><td>Decided by</td><td>{esc(LAYER_TEXT.get(decision.layer, decision.layer))}</td></tr>'
-        f'<tr><td>Confidence</td><td><span class="wb-num">{pct}%</span>'
-        f'<span class="wb-bar"><span style="width:{pct}%"></span></span></td></tr>'
+        f'<tr><td>Confidence</td><td><span class="wb-num">{pct}%</span></td></tr>'
         '</table>'
         f'<div class="reason">{esc(decision.reason)}</div></div>'
     )

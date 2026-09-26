@@ -30,25 +30,36 @@ showErrorDetails = "none"
 showSidebarNavigation = false
 
 [theme]
-# "Control room" palette (ISA-101 style: neutral greys, colour only for status). Fonts are
-# Windows system fonts with the bundled Streamlit fonts as fallback; no webfont URL anywhere.
+# "Blueprint" palette. The tokens live in ui/components/theme.py; these repeat the ones Streamlit's
+# own widgets need (test_theme.py checks they match). Fonts are Windows system fonts with the
+# bundled Streamlit fonts as fallback; no webfont URL anywhere.
 base = "light"
-primaryColor = "#1F5FA8"
-backgroundColor = "#E3E5E8"
-secondaryBackgroundColor = "#F5F6F7"
-textColor = "#22272E"
-borderColor = "#C9CDD2"
+primaryColor = "#1673E6"
+backgroundColor = "#F4F8FC"
+secondaryBackgroundColor = "#EAF1F8"
+textColor = "#1B2A3A"
+borderColor = "#DCE5EF"
+linkColor = "#1467D0"
 font = "Segoe UI, Source Sans, sans-serif"
 headingFont = "Bahnschrift, Segoe UI, sans-serif"
 codeFont = "Consolas, Source Code Pro, monospace"
 baseFontSize = 15
-baseRadius = "small"
-redColor = "#B3261E"
-greenColor = "#2E7D4F"
-orangeColor = "#C98A04"
-yellowColor = "#C98A04"
-blueColor = "#1F5FA8"
+baseRadius = "medium"
+showSidebarBorder = true
+redColor = "#C0283A"
+greenColor = "#0E7A4E"
+orangeColor = "#8A5A00"
+yellowColor = "#8A5A00"
+blueColor = "#1673E6"
+# st.warning / st.error: amber only for warnings, red only for failures.
+yellowBackgroundColor = "#FFF4DB"
+yellowTextColor = "#8A5A00"
+orangeBackgroundColor = "#FFF4DB"
+orangeTextColor = "#8A5A00"
+redBackgroundColor = "#FDECEE"
+redTextColor = "#C0283A"
+greenTextColor = "#0E7A4E"
 
 [theme.sidebar]
-backgroundColor = "#F5F6F7"
-secondaryBackgroundColor = "#E3E5E8"
+backgroundColor = "#EAF1F8"
+secondaryBackgroundColor = "#FFFFFF"

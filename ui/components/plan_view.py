@@ -47,14 +47,14 @@ def step_states(plan: list[PlanStep], events: list[AgentEvent],
 
 def plan_html(states: list[tuple[PlanStep, StepState]]) -> str:
     if not states:
-        return ('<div class="wb-h">Plan</div>'
-                '<div class="wb-empty">The steps show here once the job is planned.</div>')
+        return ('<div class="wb-planbox"><div class="wb-h">Plan</div>'
+                '<div class="wb-empty">The steps show here once the job is planned.</div></div>')
     rows = []
     for step, state in states:
         tool = f' <span class="tool">{esc(step.tool)}</span>' if step.tool else ""
         rows.append(f'<li class="{state}"><span class="mk">{MARKS[state]}</span>'
                     f'<span>{step.index}. {esc(step.title)}{tool}</span></li>')
-    return '<div class="wb-h">Plan</div><ul class="wb-plan">' + "".join(rows) + "</ul>"
+    return '<div class="wb-planbox"><div class="wb-h">Plan</div><ul class="wb-plan">' + "".join(rows) + "</ul></div>"
 
 
 def render(plan: list[PlanStep], events: list[AgentEvent], final: Optional[TaskState] = None) -> None:

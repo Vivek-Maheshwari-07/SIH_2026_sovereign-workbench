@@ -8,13 +8,13 @@ import html
 from pathlib import Path
 
 import pytest
-from fake_client import BASE_URL, TASK_ID, FakeClient, health, net_status, ok
+from fake_client import BASE_URL, TASK_ID, FakeClient, all_event_pages, health, net_status, ok
 from streamlit.testing.v1 import AppTest
 
 from shared.contracts import CONTRACT_VERSION, ERROR_CODES, ErrorInfo, Scenario, TaskMode
 from ui import api_client
 from ui.api_client import ApiResult
-from ui.components.net_faceplate import faceplate_html
+from ui.components.header_band import chips_html, seal_state
 from ui.config import ALLOWED_UPLOAD_TYPES, MAX_MESSAGE_CHARS
 from ui.scenarios import SCENARIOS, get_scenario
 
@@ -82,27 +82,72 @@ def test_health_api_error_is_friendly(monkeypatch):
                in e.value for e in at.sidebar.error)
 
 
-# ---------------------------------------------------------------- NET-001 faceplate
-def test_faceplate_green_when_zero():
-    html = faceplate_html(net_status(seen=0, now=0, firewall=True))
-    assert "NET-001" in html and 'val wb-num c-ok">0<' in html and "Blocked" in html
+# ---------------------------------------------------------------- header band chips
+@pytest.mark.parametrize("seen, now, firewall, sealed, reason", [
+    (0, 0, True, True, ""),
+    (2, 1, True, False, "NET-001 is 2"),
+    (0, 1, True, False, "1 open now"),
+    (0, 0, False, False, "firewall open"),
+    (0, 0, None, False, "firewall state unknown"),
+    (3, 0, False, False, "NET-001 is 3"),        # the leak is the more important reason
+])
+def test_seal_state(seen, now, firewall, sealed, reason):
+    assert seal_state(net_status(seen=seen, now=now, firewall=firewall)) == (sealed, reason)
 
 
-def test_faceplate_red_when_external_connections():
-    html = faceplate_html(net_status(seen=2, now=1, firewall=False))
-    assert 'val wb-num c-alarm">2<' in html and 'c-alarm">Open now 1<' in html and "Open" in html
-    assert "External since start" in html
+def test_seal_state_without_data():
+    assert seal_state(None) == (False, "no network data")
 
 
-def test_faceplate_without_data():
-    assert "No network data" in faceplate_html(None, "refused")
+def test_chips_sealed():
+    html = chips_html(net_status(seen=0, now=0, firewall=True))
+    assert '<span class="wb-chip seal ok">Air-gap sealed</span>' in html
+    assert 'NET-001 <b class="wb-num">0</b>' in html and "wb-chip alarm" not in html
+    assert "Firewall blocked" in html and "Not sealed" not in html
 
 
-def test_faceplate_red_in_app(monkeypatch):
+def test_chips_not_sealed_red_net_chip():
+    html = chips_html(net_status(seen=2, now=1, firewall=False))
+    assert '<span class="wb-chip seal warn">Not sealed: NET-001 is 2</span>' in html
+    assert 'class="wb-chip alarm"' in html and 'NET-001 <b class="wb-num">2</b>, 1 open now' in html
+    assert "Firewall open" in html
+
+
+def test_chips_firewall_open_is_not_sealed_but_net_chip_stays_blue():
+    html = chips_html(net_status(seen=0, now=0, firewall=False))
+    assert "Not sealed: firewall open" in html and "wb-chip alarm" not in html
+
+
+def test_chips_without_data():
+    html = chips_html(None, "refused")
+    assert "Not sealed: no network data" in html and 'NET-001 <b class="wb-num">--</b>' in html
+
+
+def test_header_band_in_app(monkeypatch):
     fake = FakeClient()
     fake.network_result = ok(net_status(seen=3, now=0, firewall=None))
     text = page_html(run_app(monkeypatch, fake))
-    assert 'c-alarm">3<' in text and "Unknown" in text
+    assert '<div class="wb-band">' in text and "Sovereign AI Workbench" in text
+    assert 'class="wb-chip alarm"' in text and 'NET-001 <b class="wb-num">3</b>' in text
+    assert "Not sealed: NET-001 is 3" in text and "Firewall unknown" in text
+
+
+def test_selected_work_order_gets_blue_edge_and_tag(monkeypatch):
+    fake = FakeClient()
+    at = run_app(monkeypatch, fake)
+    scn = SCENARIOS[1]
+    at.sidebar.button(key=f"wo_{scn.key}").click().run()
+    text = page_html(at)
+    assert f".st-key-wocard_{scn.key} {{ border-left: 3px solid #1673E6" in text
+    # the fake job has no events, so it finishes at once: the order stays marked, as "Selected"
+    assert text.count('<span class="wb-tag">') == 1 and '<span class="wb-tag">Selected</span>' in text
+
+
+def test_running_work_order_tag(monkeypatch):
+    fake = FakeClient(pages=all_event_pages())
+    at = run_app(monkeypatch, fake)
+    at.sidebar.button(key=f"wo_{SCENARIOS[0].key}").click().run()
+    assert '<span class="wb-tag">Running</span>' in page_html(at)
 
 
 # ---------------------------------------------------------------- actions

@@ -3,7 +3,7 @@ Streamlit UI (Track B): "control room" layout.
 
 Run:  python -m streamlit run ui/app.py --server.address 127.0.0.1 --server.port 8501
 
-Top bar: title, screen switch (Workbench / Network / Audit), NET-001 / FW-001 faceplate (5 s).
+Header band: title, one line of what it does, air-gap / NET-001 / firewall chips (5 s); screen switch below.
 Sidebar: work orders, mode, status lamps with fix hints (5 s), prewarm, reset.
 Workbench: request box, live job panel (B4, 1 s while a job runs), deliverables tray (B5). Network (B7, 2 s) and Audit (B7) screens. Resilience (B8): backend-down banner
 that re-checks every 3 s and recovers by itself, contract-version banner, friendly errors.
@@ -25,7 +25,7 @@ import streamlit as st  # noqa: E402
 from shared.contracts import CONTRACT_VERSION, HealthResponse, Scenario, TaskCreate, TaskMode  # noqa: E402
 from ui import api_client, messages  # noqa: E402
 from ui.api_client import ApiClient, ApiResult  # noqa: E402
-from ui.components import artifacts, audit_page, net_faceplate, network_panel, theme, timeline  # noqa: E402
+from ui.components import artifacts, audit_page, header_band, network_panel, theme, timeline  # noqa: E402
 from ui.components.theme import esc  # noqa: E402
 from ui.config import (  # noqa: E402
     ALLOWED_UPLOAD_TYPES,
@@ -35,8 +35,7 @@ from ui.config import (  # noqa: E402
 )
 from ui.scenarios import SCENARIOS, DemoScenario, get_scenario  # noqa: E402
 
-PAGE_TITLE = "Sovereign AI Workbench"
-TAGLINE = "Approval notes, calculation code and P&ID tag lists, drafted by local AI models."
+PAGE_TITLE = header_band.TITLE
 FOOTER = "Runs 100% offline on this machine."
 MODE_LABELS = {"Guided": TaskMode.GUIDED, "Agent": TaskMode.AGENT}
 VIEWS = ["Workbench", "Network", "Audit"]
@@ -187,15 +186,29 @@ def health_panel() -> None:
         st.markdown(health_lamps(result.data), unsafe_allow_html=True)
 
 
+def selected_work_order() -> tuple[Optional[str], str]:
+    """(scenario key, tag text) of the work order the current job runs, if any."""
+    job = timeline.get_job()
+    if job is None or job.scenario_key is None:
+        return None, ""
+    return job.scenario_key, "Running" if job.active else "Selected"
+
+
 def work_orders() -> None:
     st.markdown('<div class="wb-h">Work orders</div>', unsafe_allow_html=True)
+    selected, tag = selected_work_order()
     for scn in SCENARIOS:
-        if st.button(f"**{scn.work_order}** {scn.title}", key=f"wo_{scn.key}", width="stretch"):
-            if run_scenario(scn):
-                st.session_state["view"] = "Workbench"
-        st.markdown(f'<div class="wb-wo">{esc(scn.description)}<br>'
-                    f'<span class="io">{esc(scn.input_type)} → {esc(scn.output_type)}</span></div>',
-                    unsafe_allow_html=True)
+        with st.container(key=f"wocard_{scn.key}"):
+            if st.button(f"**{scn.work_order}** {scn.title}", key=f"wo_{scn.key}", width="stretch"):
+                if run_scenario(scn):
+                    st.session_state["view"] = "Workbench"
+                    selected, tag = scn.key, "Running"
+            chip = f'<span class="wb-tag">{tag}</span><br>' if scn.key == selected else ""
+            st.markdown(f'<div class="wb-wo">{esc(scn.description)}<br>{chip}'
+                        f'<span class="io">{esc(scn.input_type)} → {esc(scn.output_type)}</span></div>',
+                        unsafe_allow_html=True)
+    if selected is not None:
+        st.markdown(theme.selected_css(selected), unsafe_allow_html=True)
 
 
 def prewarm_panel() -> None:
@@ -232,13 +245,8 @@ def sidebar() -> None:
 
 # ---------------------------------------------------------------- main area
 def top_bar() -> None:
-    left, right = st.columns([3, 1.4], vertical_alignment="top")
-    with left:
-        st.markdown(f'<h1 class="wb-title">{PAGE_TITLE}</h1><p class="wb-sub">{TAGLINE}</p>',
-                    unsafe_allow_html=True)
-        st.segmented_control("Screen", VIEWS, default="Workbench", key="view", label_visibility="collapsed")
-    with right:
-        net_faceplate.render()
+    header_band.render()
+    st.segmented_control("Screen", VIEWS, default="Workbench", key="view", label_visibility="collapsed")
 
 
 def chat_box() -> None:
@@ -303,8 +311,7 @@ def main() -> None:
     theme.inject()
     health = fetch_health()
     if backend_down(health):
-        st.markdown(f'<h1 class="wb-title">{PAGE_TITLE}</h1><p class="wb-sub">{TAGLINE}</p>',
-                    unsafe_allow_html=True)
+        st.markdown(header_band.band_html(), unsafe_allow_html=True)
         wait_for_backend()
         footer()
         return

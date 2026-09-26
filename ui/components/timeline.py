@@ -1,6 +1,6 @@
 """
 B4: live job panel. Polls /events every second inside a fragment (only this panel reruns),
-draws the run as a process line (pipe + ISA instrument bubbles) and an event journal.
+draws the run as a process line (pipe + step bubbles) and an event journal.
 
 Rules:
   * next_seq lives in the Job in session state; a new session (page reload) starts at after=0.
@@ -32,7 +32,7 @@ from shared.contracts import (
 from ui import api_client, messages
 from ui.components import plan_view, router_badge
 from ui.scenarios import get_scenario
-from ui.components.theme import ACTIVE, ALARM, DONE, FACE, INK_2, LINE, esc, fmt_seconds
+from ui.components.theme import ACTIVE, ACTIVE_TEXT, ALARM, DONE, INK_2, PANEL, PIPE, esc, fmt_seconds
 
 JOB_KEY = "job"
 HISTORY_KEY = "job_history"
@@ -252,20 +252,19 @@ def build_stages(events: list[AgentEvent], plan: list[PlanStep], final: Optional
 
 
 def bubble_svg(stage: Stage, number: int) -> str:
-    fill, stroke, ink, dash = {
-        "done": (DONE, DONE, "#FFFFFF", ""),
-        "active": (ACTIVE, ACTIVE, "#FFFFFF", ""),
-        "open": (FACE, ACTIVE, ACTIVE, ""),
-        "failed": (ALARM, ALARM, "#FFFFFF", ""),
-        "wait": (FACE, LINE, INK_2, ' stroke-dasharray="3 2"'),
+    fill, stroke, ink = {
+        "done": (DONE, DONE, "#FFFFFF"),
+        "active": (ACTIVE, ACTIVE, "#FFFFFF"),
+        "open": (PANEL, ACTIVE, ACTIVE_TEXT),
+        "failed": (ALARM, ALARM, "#FFFFFF"),
+        "wait": (PANEL, PIPE, INK_2),
     }[stage.state]
-    ring = '<circle class="ring" cx="23" cy="23" r="20"/>' if stage.state == "active" else ""
+    ring = '<circle class="ring" cx="23" cy="23" r="21"/>' if stage.state == "active" else ""
     return (
-        f'<svg width="46" height="46" viewBox="0 0 46 46" role="img" aria-label="{esc(stage.caption)}: {stage.state}">'
-        f'{ring}<circle cx="23" cy="23" r="20" fill="{fill}" stroke="{stroke}" stroke-width="2"{dash}/>'
-        f'<line x1="3" y1="23" x2="43" y2="23" stroke="{ink}" stroke-width="1" opacity="0.8"/>'
-        f'<text x="23" y="19" text-anchor="middle" fill="{ink}">{esc(stage.code)}</text>'
-        f'<text x="23" y="36" text-anchor="middle" fill="{ink}">{number:02d}</text></svg>'
+        f'<svg width="46" height="46" viewBox="0 0 46 46" role="img" '
+        f'aria-label="Step {number}, {esc(stage.caption)}: {stage.state}">'
+        f'{ring}<circle cx="23" cy="23" r="21" fill="{fill}" stroke="{stroke}" stroke-width="2"/>'
+        f'<text x="23" y="29.5" text-anchor="middle" fill="{ink}">{esc(stage.code)}</text></svg>'
     )
 
 
