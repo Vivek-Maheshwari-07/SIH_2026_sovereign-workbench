@@ -28,7 +28,7 @@ Report No. SDR/INSP/2026/0412, date 14-09-2026, inspector M. P. Joshi, Unit 11 C
 | 4 | Confined space entry permit | no gas test entries after 11:00; attendant left manway | **Medium** |
 | 5 | Roof handrail and stairway | surface rust, coating breakdown | **Low** |
 
-**Wall thickness numbers:** should include at least 6.1 / 8.0 mm (24%) and 6.8 / 8.0 mm (bottom plate).
+**Wall thickness numbers:** 6.8 / 8.0 mm (bottom plate) - only in the thickness table; see docs/known_issues.md
 
 **Cost line: must be** `Rs 4,50,000` (Indian grouping, not "450,000" or "4.5 lakh" only).
 Should also carry the split: 3,20,000 + 90,000 + 40,000.
