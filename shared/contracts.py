@@ -274,11 +274,13 @@ class Connection(BaseModel):
                                    # only loopback is local; LAN addresses count as external.
     # 1.0.1 (optional):
     group: Optional[Literal["established", "attempt"]] = None  # attempt = SYN_SENT/SYN_RECV, never connected
-    origin: Optional[Literal["ours", "other_app", "probe"]] = None  # ours = backend/Ollama/UI/Docker/WSL
+    origin: Optional[Literal["ours", "other_app", "probe"]] = None  # ours = backend/Ollama/UI + platform
     first_seen: Optional[datetime] = None  # when the monitor first saw this (pid, remote, group)
     # 1.0.2 (optional), set only when origin == "ours":
-    #   core     = backend pid tree (backend + all its children), Ollama, Streamlit UI -> the sovereign proof
-    #   platform = Docker Desktop / WSL host services (com.docker.*, vpnkit, wsl*, vmmem*) -> counted apart
+    #   core     = backend pid tree (backend + all its children), Ollama model server (ollama.exe,
+    #              ollama_llama_server), Streamlit UI -> the sovereign proof
+    #   platform = Docker Desktop / WSL / Ollama tray app: com.docker.*, vpnkit, wsl*, vmmem*,
+    #              "ollama app.exe" (update checks) -> counted apart
     component: Optional[Literal["core", "platform"]] = None
 
 
@@ -297,7 +299,8 @@ class NetworkStatus(BaseModel):
     other_apps_since_start: Optional[int] = None   # unique established connections of other apps (info only)
     probe_since_start: Optional[int] = None        # unique connections made by /network/probe
     monitor_error: Optional[str] = None            # last psutil error; None = monitor healthy
-    # 1.0.2 (optional). Docker Desktop / WSL (Connection.component "platform"), counted apart from core.
+    # 1.0.2 (optional). Docker Desktop / WSL / Ollama tray app (Connection.component "platform"),
+    # counted apart from core.
     platform_seen_since_start: Optional[int] = None      # unique established platform connections
     platform_attempts_since_start: Optional[int] = None  # unique platform attempts (also inside attempts_since_start)
 

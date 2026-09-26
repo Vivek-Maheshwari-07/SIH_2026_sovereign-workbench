@@ -29,7 +29,7 @@ Needs agreement from Dev B.
 - `NetworkStatus.probe_since_start: Optional[int]`: unique connections made by `POST /network/probe` itself.
 - `NetworkStatus.monitor_error: Optional[str]`: last psutil error (e.g. permissions); `None` = monitor healthy.
 - `Connection.group: Optional["established" | "attempt"]`.
-- `Connection.origin: Optional["ours" | "other_app" | "probe"]`: "ours" = backend and its children, Ollama, Streamlit, Docker Desktop / WSL.
+- `Connection.origin: Optional["ours" | "other_app" | "probe"]`: "ours" = backend and its children, Ollama, Streamlit, Docker Desktop / WSL / Ollama tray app.
 - `Connection.first_seen: Optional[datetime]`: when the monitor first saw this (pid, remote ip, remote port, group).
 - Comment on `Connection.external` updated: only loopback is local; LAN addresses count as external (strict mode for the laptop demo). Code already worked this way.
 
@@ -54,10 +54,12 @@ runs our sandbox, so it must be shown honestly rather than hidden or silently dr
 **Change (only NEW OPTIONAL fields; nothing renamed or removed):**
 
 - `Connection.component: Optional["core" | "platform"]`, set only when `origin == "ours"`:
-  - `core`: the backend process and its whole child pid tree, Ollama (`ollama.exe`, `ollama app.exe`,
-    `ollama_llama_server`), and the Streamlit UI. This is the sovereign proof.
-  - `platform`: Docker Desktop and the WSL host services (`com.docker.*`, `Docker Desktop`, `vpnkit`,
-    `wsl*`, `vmmem*`). Shown and counted separately.
+  - `core`: the backend process and its whole child pid tree, the Ollama model server (`ollama.exe`,
+    whose runners are `ollama.exe runner`; older builds `ollama_llama_server`), and the Streamlit UI.
+    This is the sovereign proof.
+  - `platform`: Docker Desktop / WSL / Ollama tray app: the Docker Desktop and WSL host services
+    (`com.docker.*`, `Docker Desktop`, `vpnkit`, `wsl*`, `vmmem*`) and the Ollama Windows tray app
+    (`ollama app.exe`, update checks). Shown and counted separately.
   - A `python.exe` outside the backend's pid tree (for example an IDE language server) is `other_app`.
 - `NetworkStatus.platform_seen_since_start: Optional[int]`: unique established platform connections.
 - `NetworkStatus.platform_attempts_since_start: Optional[int]`: unique platform attempts (these are also
@@ -71,3 +73,10 @@ A new platform connection is written as `name="platform_connection"`, `ok=false`
 
 **Compatibility:** 1.0.0 and 1.0.1 payloads still validate (new fields default to `None`). The backend keeps
 the `X-Net-*` headers. `Connection.process` now ends in "[ours: core]" / "[ours: platform]" instead of "[ours]".
+
+### 1.0.2 clarification: Ollama tray app
+
+**Requested by:** Track A (A9 follow-up, found by the UI's NET-001 faceplate)
+**Status:** applied 2026-09-26.
+
+Comment-only clarification: Ollama tray app is platform (no version change).

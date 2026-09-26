@@ -197,15 +197,15 @@ def test_process_name_access_denied_and_gone_are_handled():
     assert mon.status(None).external_seen_since_start == 0 and mon.summary()["other_apps_since_start"] == 2
 
 
-CORE_PIDS = (CHILD_PID, 2001, 2002, 2003, 2004)
-PLATFORM_PIDS = (4001, 4002, 4003, 4004, 4005, 4006)
+CORE_PIDS = (CHILD_PID, 2001, 2003, 2004)
+PLATFORM_PIDS = (2002, 4001, 4002, 4003, 4004, 4005, 4006)
 OTHER_PIDS = (3001, 3002, 3003)
 
 
 def _mixed_processes():
     return {
         2001: FakeProcess(2001, "ollama.exe"),
-        2002: FakeProcess(2002, "ollama app.exe"),
+        2002: FakeProcess(2002, "ollama app.exe"),                                   # tray app / updater
         2003: FakeProcess(2003, "ollama_llama_server.exe"),
         2004: FakeProcess(2004, "python.exe", cmdline=("python", "-m", "streamlit", "run", "ui/app.py")),
         4001: FakeProcess(4001, "com.docker.backend.exe"),
@@ -261,6 +261,37 @@ def test_docker_backend_is_platform_not_core_and_not_hidden(caplog):
     messages = [r.getMessage() for r in caplog.records if "New external connection" in r.getMessage()]
     assert len(messages) == 3 and sum("PLATFORM" in m for m in messages) == 2
     assert not any("LEAK" in m for m in messages)
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("ollama.exe", "core"), ("OLLAMA.EXE", "core"), ("ollama_llama_server.exe", "core"),
+    ("ollama app.exe", "platform"), ("Ollama App.exe", "platform"), ("ollama-helper.exe", None),
+])
+def test_ollama_server_is_core_tray_app_is_platform(name, expected):
+    assert net_monitor.component_by_name(net_monitor._normalize_name(name)) == expected
+
+
+def test_ollama_tray_app_update_check_is_platform_not_a_leak(caplog):
+    """The real finding from the UI: "ollama app.exe" (tray app) reached an update server on 443."""
+    procs = {2001: FakeProcess(2001, "ollama.exe"), 2002: FakeProcess(2002, "ollama app.exe")}
+    table = [conn(pid=2002, remote=("34.36.133.15", 443))]
+    mon = make_monitor(table, procs)
+    with caplog.at_level(logging.WARNING, logger="backend.net_monitor"):
+        mon.poll_once()
+        mon.poll_once()
+    status = mon.status(None)
+    assert status.external_seen_since_start == 0 and status.external_count == 0     # headline stays 0
+    assert status.platform_seen_since_start == 1                                    # counted under platform
+    assert [(c.process, c.component) for c in status.connections] == [("ollama app.exe [ours: platform]", "platform")]
+    platform = [r for r in read_audit_records(limit=100) if r.name == "platform_connection"]
+    assert len(platform) == 1 and network_audit() == []
+    assert platform[0].detail["process"] == "ollama app.exe" and platform[0].ok is False   # flagged, not hidden
+    messages = [r.getMessage() for r in caplog.records if "New external connection" in r.getMessage()]
+    assert len(messages) == 1 and "Ollama tray app" in messages[0] and "LEAK" not in messages[0]
+
+    table.append(conn(pid=2001, remote=("34.36.133.16", 443)))                      # the model server itself
+    mon.poll_once()
+    assert mon.status(None).external_seen_since_start == 1                          # that IS a core leak
 
 
 def test_python_outside_backend_pid_tree_is_other_app():

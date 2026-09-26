@@ -67,13 +67,13 @@ CODE_CALC_MESSAGE = (
 PID_MESSAGE = "Extract every equipment and instrument tag from this P&ID drawing into an Excel tag list."
 
 COUNTER_HELP: list[tuple[str, str]] = [
-    ("external_count", "Core external connections open right now (backend + its children, Ollama, UI)."),
+    ("external_count", "Core external connections open right now (backend + its children, Ollama model server, UI)."),
     ("external_seen_since_start", "Unique core external connections since the backend started. "
                                   "The headline number: must be 0."),
     ("attempts_since_start", "Unique outbound attempts that never connected (SYN_SENT). Not leaks."),
-    ("platform_seen_since_start", "Docker Desktop / WSL host services that connected out. Not workbench "
+    ("platform_seen_since_start", "Docker Desktop / WSL / Ollama tray app that connected out. Not workbench "
                                   "code; counted apart from core."),
-    ("platform_attempts_since_start", "Docker Desktop / WSL attempts that never connected "
+    ("platform_attempts_since_start", "Docker Desktop / WSL / Ollama tray app attempts that never connected "
                                       "(also inside attempts_since_start)."),
     ("other_apps_since_start", "Other programs on this laptop (browser, updates). Info only."),
     ("probe_since_start", "Connections made on purpose by /network/probe (the 'try to reach the "
@@ -383,8 +383,9 @@ def render_report(ev: Evidence, checks: list[Check]) -> str:
               for name, help_text in COUNTER_HELP]
     lines += [f"| monitor_error | {_md_cell(before.get('monitor_error') or '-')} | "
               f"{_md_cell(after.get('monitor_error') or '-')} | Last psutil error; '-' = monitor healthy. |", ""]
-    lines += ["Only the **core** counters decide the proof. Platform (Docker Desktop / WSL), other apps, "
-              "attempts and probe connections are shown for transparency but are not workbench traffic.", ""]
+    lines += ["Only the **core** counters decide the proof. Platform (Docker Desktop / WSL / Ollama tray app), "
+              "other apps, attempts and probe connections are shown for transparency but are not workbench "
+              "traffic.", ""]
     lines += render_audit(ev.audit)
     lines += ["", "Raw API responses: `raw.json`. Evidence card: `summary.png`. Screen: `screenshot.png`.", ""]
     return "\n".join(lines)

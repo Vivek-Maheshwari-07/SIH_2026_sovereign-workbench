@@ -14,12 +14,15 @@ Per socket:
     did, e.g. blocked by the firewall. Shown, never counted as a leak.
   - origin "ours", split into two components:
       component "core": the backend pid tree (this process and all its
-        children), Ollama and the Streamlit UI. This is the sovereign proof.
+        children), the Ollama model server (ollama.exe, which also runs the
+        model runners as "ollama.exe runner"; older builds: ollama_llama_server)
+        and the Streamlit UI. This is the sovereign proof.
       component "platform": Docker Desktop and the WSL host services
-        (com.docker.*, vpnkit, wsl*, vmmem*). They run the sandbox but also
-        phone home on their own (update checks, usage statistics), so they
-        are shown and counted separately, never hidden.
-    Core membership comes from the pid tree or the Ollama/Streamlit names;
+        (com.docker.*, vpnkit, wsl*, vmmem*), and the Ollama Windows tray app
+        ("ollama app.exe", which checks for updates). They support the
+        workbench but also phone home on their own (update checks, usage
+        statistics), so they are shown and counted separately, never hidden.
+    Core membership comes from the pid tree or the core names above;
     a python.exe outside the backend's pid tree (an IDE language server,
     another script) is NOT core.
     origin "other_app": any other app on the laptop, shown for information.
@@ -68,8 +71,11 @@ PROBE_GRACE_S = 240.0            # probe sockets linger in TIME_WAIT up to 4 min
 STOP_JOIN_S = 5.0
 
 # Process names (lower case, ".exe" stripped). The backend itself is core by pid tree, not by name.
-CORE_PROCESS_NAMES = frozenset({"ollama", "ollama app", "ollama_llama_server", "streamlit"})
-PLATFORM_PROCESS_NAMES = frozenset({"docker", "dockerd", "docker desktop", "vpnkit"})
+# Core Ollama = the model server "ollama.exe" (its runners are "ollama.exe runner", same name) and the
+# older "ollama_llama_server.exe" runner. The tray app "ollama app.exe" only does update checks and
+# UI, so it is platform (shown and counted apart), not core.
+CORE_PROCESS_NAMES = frozenset({"ollama", "ollama_llama_server", "streamlit"})
+PLATFORM_PROCESS_NAMES = frozenset({"docker", "dockerd", "docker desktop", "vpnkit", "ollama app"})
 PLATFORM_NAME_PREFIXES = ("com.docker.", "wsl", "vmmem")
 _PYTHON_NAMES = frozenset({"python", "pythonw", "python3"})
 ORIGIN_LABELS: dict[str, str] = {"ours": "ours", "other_app": "other app", "probe": "probe"}
@@ -371,7 +377,7 @@ class NetMonitor:
         if seen.is_leak:
             flag = " (LEAK)"
         elif seen.is_platform_connection:
-            flag = " (PLATFORM: Docker Desktop / WSL, not workbench code)"
+            flag = " (PLATFORM: Docker Desktop / WSL / Ollama tray app, not workbench code)"
         else:
             flag = ""
         self.log.warning(
