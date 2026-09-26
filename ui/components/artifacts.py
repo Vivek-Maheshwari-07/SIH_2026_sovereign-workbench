@@ -12,7 +12,7 @@ from typing import Any, Optional
 import streamlit as st
 
 from shared.contracts import Artifact, ArtifactKind, ErrorInfo
-from ui import api_client
+from ui import api_client, messages
 from ui.api_client import DownloadedFile
 from ui.components.theme import esc, human_size
 
@@ -117,8 +117,8 @@ def entry_row(art: Artifact, first: bool) -> None:
                 f'<span class="wb-meta wb-num">{human_size(art.size_bytes)}</span></div>', unsafe_allow_html=True)
     entry = load(art)
     if entry.file is None:
-        msg = entry.error.message if entry.error else "unknown error"
-        st.warning(f"Could not fetch {art.filename} from the backend: {msg}")
+        st.warning(messages.friendly(f"Could not fetch {art.filename} from the backend", entry.error)
+                   if entry.error else f"Could not fetch {art.filename} from the backend. Press Try again.")
         st.button("Try again", key=f"retry_{art.artifact_id}", on_click=forget, args=(art.artifact_id,))
         return
     st.download_button("Download", data=entry.file.content, file_name=art.filename, mime=entry.file.media_type,
@@ -128,7 +128,7 @@ def entry_row(art: Artifact, first: bool) -> None:
 
 
 def tray(artifacts: list[Artifact]) -> None:
-    st.markdown('<div class="wb-h">Deliverables</div>', unsafe_allow_html=True)
+    st.markdown('<div class="wb-h tray">Deliverables</div>', unsafe_allow_html=True)
     if not artifacts:
         st.markdown('<div class="wb-empty">Files the job produces (Word notes, Excel tag lists, code) '
                     'appear here with a preview and a download button.</div>', unsafe_allow_html=True)

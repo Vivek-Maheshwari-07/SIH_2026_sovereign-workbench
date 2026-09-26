@@ -113,7 +113,7 @@ def test_cancel_error_is_friendly(monkeypatch):
     fake.cancel_task = lambda tid: ApiResult(error=ErrorInfo(code="TASK_NOT_FOUND", message="gone"), failure="api")
     at = start_job(monkeypatch, fake)
     at.button(key="cancel_job").click().run()
-    assert any("Could not cancel the job: gone" in e.value for e in at.error)
+    assert any("The job could not be cancelled: gone." in e.value for e in at.error)
 
 
 def test_poll_error_keeps_polling(monkeypatch):
@@ -146,8 +146,8 @@ def test_unknown_task_stops_polling(monkeypatch):
     fake.poll_events = lambda tid, after=0: PollResult(next_seq=after, error=ErrorInfo(code="TASK_NOT_FOUND",
                                                                                       message="task_id does not exist."))
     at = start_job(monkeypatch, fake)
-    assert job(at).done and fake.task_gets == 0
-    assert any("task_id does not exist" in e.value for e in at.error)
+    assert job(at).done and job(at).lost and fake.task_gets == 0
+    assert "The backend restarted, this job was lost. Run it again." in html(at)
 
 
 def test_live_elapsed_and_queued_state(monkeypatch):

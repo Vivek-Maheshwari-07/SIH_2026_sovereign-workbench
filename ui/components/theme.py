@@ -54,12 +54,14 @@ h1.wb-title, .wb-title {{ font-family: var(--din) !important; font-size: 26px !i
 .wb-plate > div + div {{ border-left: none; }}
 .wb-plate .tag {{ font-family: var(--din); font-size: 12px; color: var(--ink-2); letter-spacing: 0.02em; }}
 .wb-plate .val {{ font-family: var(--din); font-size: 20px; font-weight: 600; line-height: 1.2; }}
-.wb-plate .lbl {{ font-size: 12px; color: var(--ink-2); }}
+.wb-plate .lbl {{ font-size: 12px; color: var(--ink-2); white-space: nowrap; }}
+.wb-plate .sub {{ font-family: var(--din); font-size: 12px; color: var(--ink-2); white-space: nowrap; }}
 
 /* status lamps */
 .wb-lamp {{ display: flex; align-items: baseline; gap: 8px; font-size: 13px; margin: 3px 0; color: var(--ink); }}
 .wb-lamp i {{ width: 9px; height: 9px; border-radius: 50%; flex: none; display: inline-block; position: relative; top: 1px; }}
 .wb-lamp .why {{ color: var(--ink-2); font-size: 12px; }}
+.wb-lamp .fix {{ display: block; color: var(--alarm); font-size: 12px; font-weight: 600; }}
 .c-ok {{ color: var(--ok); }} .c-alarm {{ color: var(--alarm); }} .c-warn {{ color: var(--warn-text); }}
 .c-active {{ color: var(--active); }} .c-dim {{ color: var(--ink-2); }}
 .b-ok {{ background: var(--ok); }} .b-alarm {{ background: var(--alarm); }} .b-off {{ background: #9AA1A9; }}
@@ -137,12 +139,66 @@ h1.wb-title, .wb-title {{ font-family: var(--din) !important; font-size: 26px !i
 .wb-result.failed {{ border-left-color: var(--alarm); }} .wb-result.cancelled {{ border-left-color: var(--line); }}
 .wb-result .ans {{ font-size: 14px; margin: 4px 0 0 0; color: var(--ink); line-height: 1.45; }}
 
+/* idle screen: how a job runs + last job */
+.wb-how {{ display: flex; flex-wrap: wrap; gap: 0; margin: 6px 0 4px 0; }}
+.wb-how .s {{ flex: 1 1 180px; display: flex; gap: 10px; align-items: flex-start; padding: 6px 14px 6px 0; }}
+.wb-how .n {{ font-family: var(--din); font-weight: 600; font-size: 13px; width: 26px; height: 26px; flex: none;
+  border: 2px solid var(--line); border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--ink-2); }}
+.wb-how .t {{ font-size: 14px; color: var(--ink); font-weight: 600; }}
+.wb-how .d {{ font-size: 12.5px; color: var(--ink-2); line-height: 1.35; }}
+.wb-last {{ border-left: 4px solid var(--line); background: var(--face); padding: 8px 12px; }}
+.wb-last.succeeded {{ border-left-color: var(--ok); }} .wb-last.failed {{ border-left-color: var(--alarm); }}
+.wb-last .row {{ display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; }}
+.wb-last .files {{ font-size: 12.5px; color: var(--ink-2); margin-top: 3px; }}
+.wb-last .ans {{ font-size: 13.5px; color: var(--ink); margin-top: 4px; }}
+
+/* banners */
+.wb-banner {{ border-left: 6px solid var(--alarm); background: var(--face); padding: 12px 16px; margin: 8px 0; }}
+.wb-banner .h {{ font-family: var(--din); font-size: 20px; font-weight: 600; color: var(--alarm); }}
+.wb-banner p {{ margin: 4px 0 0 0; font-size: 14px; color: var(--ink); }}
+.wb-banner.warn {{ border-left-color: var(--warn); }} .wb-banner.warn .h {{ color: var(--warn-text); }}
+
+/* network page */
+.wb-net-head {{ display: flex; flex-wrap: wrap; gap: 0; margin-top: 4px; }}
+.wb-net-head > div {{ background: var(--face); border: 1px solid var(--rule); padding: 10px 18px; }}
+.wb-net-head > div + div {{ border-left: none; }}
+.wb-net-head .big {{ min-width: 300px; }}
+.wb-net-head .side {{ min-width: 240px; max-width: 360px; }}
+.wb-net-head .tag, .wb-readings .tag {{ font-family: var(--din); font-size: 12px; color: var(--ink-2); }}
+.wb-net-head .val {{ font-family: var(--din); font-size: 64px; font-weight: 600; line-height: 1; margin: 4px 0; }}
+.wb-net-head .val2, .wb-probe .val2 {{ font-family: var(--din); font-size: 26px; font-weight: 600; line-height: 1.2; margin: 6px 0 4px 0; }}
+.wb-net-head .lbl, .wb-readings .lbl {{ font-size: 13px; color: var(--ink); }}
+.wb-net-head .note, .wb-readings .note, .wb-probe .note {{ font-size: 12.5px; color: var(--ink-2); line-height: 1.35; margin-top: 3px; }}
+.wb-net-verdict {{ font-size: 15px; font-weight: 600; margin: 8px 0 0 0; }}
+.wb-net-note {{ font-size: 13px; color: var(--ink-2); margin: 2px 0 0 0; max-width: 900px; }}
+.wb-readings {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 0; margin: 10px 0 12px 0; }}
+.wb-readings .cell {{ border-top: 1px solid var(--rule); padding: 8px 14px 8px 0; }}
+.wb-readings .v {{ font-family: var(--din); font-size: 22px; font-weight: 600; line-height: 1.2; }}
+.wb-probe {{ border-left: 4px solid var(--ok); background: var(--face); padding: 6px 12px; margin: 6px 0 10px 0; }}
+.wb-probe.alarm {{ border-left-color: var(--alarm); }}
+.wb-conn {{ width: 100%; border-collapse: collapse; font-size: 13px; border: none !important; }}
+.wb-conn th {{ text-align: left; font-weight: 600; color: var(--ink-2); font-size: 12px; padding: 4px 8px 4px 0;
+  border: none !important; border-bottom: 1px solid var(--line) !important; background: none !important; }}
+.wb-conn tr {{ border: none !important; background: none; }}
+.wb-conn td {{ padding: 3px 8px 3px 0; border: none !important; border-bottom: 1px solid #D5D9DE !important; vertical-align: top; }}
+.wb-conn td.mono {{ font-family: var(--din); font-size: 12.5px; overflow-wrap: anywhere; }}
+.wb-conn td.t, .wb-conn td.d {{ font-family: var(--din); font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--ink-2); }}
+.wb-conn tr.core td, .wb-conn tr.leak td {{ background: #F6E3E1; color: var(--alarm); }}
+.wb-conn tr.core td:first-child, .wb-conn tr.leak td:first-child {{ box-shadow: inset 4px 0 0 var(--alarm); padding-left: 8px; }}
+.wb-conn tr.platform td {{ background: #F7EED6; color: var(--warn-text); }}
+.wb-conn tr.platform td:first-child {{ box-shadow: inset 4px 0 0 var(--warn); padding-left: 8px; }}
+.wb-conn tr.other td, .wb-conn tr.probe td {{ color: var(--ink-2); }}
+.wb-conn tr.fail td {{ color: var(--alarm); }}
+.wb-conn td:first-child, .wb-conn th:first-child {{ padding-left: 8px; }}
+.wb-audit td.task {{ font-family: var(--din); font-size: 12px; white-space: nowrap; color: var(--ink-2); }}
+
 /* deliverables */
 .wb-file {{ display: flex; align-items: baseline; gap: 8px; }}
 .wb-file .kind {{ font-family: var(--din); font-size: 12px; font-weight: 600; color: var(--ink); border: 1px solid var(--line);
   padding: 0 5px; border-radius: 2px; }}
 .wb-file .name {{ font-size: 14px; color: var(--ink); overflow-wrap: anywhere; }}
-.wb-footer {{ margin-top: 10px; color: var(--ink-2); font-size: 12px; text-align: right; }}
+.wb-h.tray {{ margin-top: 18px; }}
+.wb-footer {{ margin-top: 14px; color: var(--ink-2); font-size: 12px; }}
 </style>
 """
 

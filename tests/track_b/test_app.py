@@ -48,7 +48,7 @@ def test_renders_with_healthy_backend(monkeypatch):
         assert scn.work_order in at.sidebar.button(key=f"wo_{scn.key}").label
         assert html.escape(f"{scn.input_type} → {scn.output_type}") in text
     assert at.sidebar.radio(key="mode_label").value == "Guided"
-    assert "No job running. Pick a work order on the left or describe the job below." in text
+    assert "No job running. Pick a work order on the left or describe the job above." in text
     assert "Deliverables" in text and "Filled in" not in text
     assert not at.error
 
@@ -57,26 +57,29 @@ def test_renders_with_unhealthy_backend(monkeypatch):
     at = run_app(monkeypatch, FakeClient(ok(health(ok=False, chunks=0))))
     text = page_html(at)
     assert text.count('<i class="b-alarm">') == 4
-    assert "Docker not running or image missing" in text and "run scripts/ingest.py" in text
+    for fix in ("Start Ollama", "Open Docker Desktop", "Install Tesseract OCR", "Run python scripts/ingest.py"):
+        assert f'<span class="fix">{fix}' in text, fix
 
 
 def test_backend_down_banner(monkeypatch):
     down = ApiResult(error=ErrorInfo(code="INTERNAL", message="refused", retryable=True), failure="unreachable")
     at = run_app(monkeypatch, FakeClient(down))
-    assert any(f"Backend not reachable at {BASE_URL}" in e.value for e in at.error)
+    assert f"Backend not reachable at {BASE_URL}" in page_html(at)
     assert len(at.sidebar.button) == 0 and len(at.columns) == 0  # rest of the page not shown
 
 
 def test_version_mismatch_shows_red_warning(monkeypatch):
     at = run_app(monkeypatch, FakeClient(ApiResult(data=health(), status_code=200, contract_version="0.9.0")))
-    assert any("Contract version mismatch" in e.value for e in at.sidebar.error)
+    text = page_html(at)
+    assert "Contract version mismatch" in text and "0.9.0" in text and CONTRACT_VERSION in text
 
 
 def test_health_api_error_is_friendly(monkeypatch):
     result = ApiResult(error=ErrorInfo(code="INTERNAL", message="Unexpected server error"), failure="api",
                        status_code=500, contract_version=CONTRACT_VERSION)
     at = run_app(monkeypatch, FakeClient(result))
-    assert any("Health check failed: Unexpected server error" in e.value for e in at.sidebar.error)
+    assert any("The health check failed: Unexpected server error. Something failed inside the backend"
+               in e.value for e in at.sidebar.error)
 
 
 # ---------------------------------------------------------------- NET-001 faceplate
@@ -87,7 +90,8 @@ def test_faceplate_green_when_zero():
 
 def test_faceplate_red_when_external_connections():
     html = faceplate_html(net_status(seen=2, now=1, firewall=False))
-    assert 'val wb-num c-alarm">2<' in html and "open now: 1" in html and "Open" in html
+    assert 'val wb-num c-alarm">2<' in html and 'c-alarm">Open now 1<' in html and "Open" in html
+    assert "External since start" in html
 
 
 def test_faceplate_without_data():
@@ -149,7 +153,8 @@ def test_create_task_error_is_friendly(monkeypatch):
     at = run_app(monkeypatch, fake)
     at.sidebar.button(key="wo_code_calc").click().run()
     assert not at.exception
-    assert any("Could not start the job: scenario missing" in e.value for e in at.sidebar.error)
+    assert any("The job could not be started: scenario missing. Check the request and try again." in e.value
+               for e in at.sidebar.error)
     assert "job" not in at.session_state
 
 

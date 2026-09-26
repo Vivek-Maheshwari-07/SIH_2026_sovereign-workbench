@@ -13,7 +13,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Literal, Optional
+from typing import Callable, Literal, Optional
 
 import streamlit as st
 from pydantic import ValidationError
@@ -29,11 +29,16 @@ from shared.contracts import (
     TaskState,
     TaskStatus,
 )
-from ui import api_client
+from ui import api_client, messages
 from ui.components import plan_view, router_badge
+from ui.scenarios import get_scenario
 from ui.components.theme import ACTIVE, ALARM, DONE, FACE, INK_2, LINE, esc, fmt_seconds
 
 JOB_KEY = "job"
+HISTORY_KEY = "job_history"
+LOOKUP_KEY = "last_job_lookup"
+TASK_QUERY_KEY = "task"        # ?task=<id> lets a page reload pick the job up again (from after=0)
+AUDIT_LOOKBACK = 1000          # audit records searched for the last finished job (once per session)
 POLL_S = 1.0
 
 BubbleState = Literal["wait", "active", "open", "done", "failed"]
@@ -71,10 +76,17 @@ class Job:
     cancel_sent: bool = False
     cancel_error: Optional[ErrorInfo] = None
     announced: bool = False                    # full-page rerun done after finishing
+    scenario_key: Optional[str] = None         # demo scenario, so "Run it again" can repeat it
+    had_files: bool = False                    # chat job with attachments (cannot be re-sent without them)
+    lost: bool = False                         # TASK_NOT_FOUND: the backend restarted and forgot the job
 
     @property
     def active(self) -> bool:
-        return not self.done or (self.final is None and self.final_error is None)
+        return not self.lost and (not self.done or (self.final is None and self.final_error is None))
+
+    @property
+    def can_rerun(self) -> bool:
+        return self.scenario_key is not None or (bool(self.message) and not self.had_files)
 
 
 def get_job() -> Optional[Job]:
@@ -92,8 +104,8 @@ def poll_once(job: Job) -> None:
     """One events poll. Errors are remembered and shown; the cursor only moves on success."""
     result = api_client.get_client().poll_events(job.task_id, job.after)
     if result.error is not None:
-        if result.error.code == "TASK_NOT_FOUND":  # e.g. backend restarted: the job is gone, stop polling
-            job.done, job.final_error, job.poll_error = True, result.error, None
+        if result.error.code == "TASK_NOT_FOUND":  # the backend restarted: the job is gone, stop polling
+            job.done, job.lost, job.poll_error = True, True, None
             return
         job.poll_error = result.error
         return
@@ -107,6 +119,9 @@ def poll_once(job: Job) -> None:
 def fetch_final(job: Job) -> None:
     job.state_fetches += 1
     result = api_client.get_client().get_task(job.task_id)
+    if result.error is not None and result.error.code == "TASK_NOT_FOUND":
+        job.lost = True
+        return
     job.final, job.final_error = result.data, result.error
 
 
@@ -337,6 +352,7 @@ def journal_html(events: list[AgentEvent]) -> str:
 STATE_STYLE = {
     "queued": ("Queued", "c-dim"), "running": ("Running", "c-active"), "stopping": ("Stopping", "c-warn"),
     "succeeded": ("Succeeded", "c-ok"), "failed": ("Failed", "c-alarm"), "cancelled": ("Cancelled", "c-dim"),
+    "lost": ("Lost", "c-warn"),
 }
 
 
@@ -348,23 +364,29 @@ def live_state(job: Job) -> str:
     return "running" if job.events else "queued"
 
 
-def header(job: Job) -> None:
-    label, css = STATE_STYLE[live_state(job)]
+def header(job: Job, rerun: Optional[Callable[[Job], bool]] = None) -> None:
+    label, css = STATE_STYLE["lost" if job.lost else live_state(job)]
     what = " · ".join(x for x in (job.work_order, job.mode.value.capitalize() if job.mode else None) if x)
     left, mid, right = st.columns([5, 1.3, 1.7], vertical_alignment="center")
     left.markdown(
         f'<div class="wb-job"><span class="id">Job {esc(job.task_id)}</span>'
         f'<span class="wb-state {css}">{label}</span><span class="wb-meta">{esc(what)}</span></div>',
         unsafe_allow_html=True)
-    mid.markdown(f'<div class="wb-clock" title="Elapsed time">{fmt_seconds(elapsed_s(job))}</div>',
-                 unsafe_allow_html=True)
+    if not job.lost:
+        mid.markdown(f'<div class="wb-clock" title="Elapsed time">{fmt_seconds(elapsed_s(job))}</div>',
+                     unsafe_allow_html=True)
     if job.active and not job.done:
         right.button("Cancel job", key="cancel_job", disabled=job.cancel_sent, width="stretch",
                      on_click=cancel_job, args=(job,))
-    st.markdown(f'<div class="wb-job"><span class="msg" title="{esc(job.message or (job.final.message if job.final else ''))}">'
-                f'{esc(job.message or (job.final.message if job.final else "")) or "Resumed after page reload"}</span></div>', unsafe_allow_html=True)
+    elif right.button("Close job", key="close_job", width="stretch",
+                      help="Put this job away. It stays on the start screen as the last finished job."):
+        close_job()
+        st.rerun(scope="app")
+    message = job.message or (job.final.message if job.final else "")
+    st.markdown(f'<div class="wb-job"><span class="msg" title="{esc(message)}">'
+                f'{esc(message) or "Resumed after page reload"}</span></div>', unsafe_allow_html=True)
     if job.cancel_error is not None:
-        st.error(f"Could not cancel the job: {job.cancel_error.message}")
+        messages.show("The job could not be cancelled", job.cancel_error)
 
 
 def cancel_job(job: Job) -> None:
@@ -383,9 +405,26 @@ def multiline(text: str) -> str:
     return "<br>".join(esc(line) for line in text.splitlines())
 
 
+LOST_TEXT = "The backend restarted, this job was lost. Run it again."
+
+
+def lost_box(job: Job, rerun: Optional[Callable[[Job], bool]]) -> None:
+    st.markdown(f'<div class="wb-banner warn"><div class="h">{LOST_TEXT}</div>'
+                "<p>Jobs live in the backend's memory, so a restart forgets them. "
+                "Files you already downloaded are safe.</p></div>", unsafe_allow_html=True)
+    if rerun is not None and job.can_rerun:
+        if st.button("Run it again", key="rerun_job", type="primary"):
+            if rerun(job):
+                st.rerun(scope="app")
+    elif job.had_files:
+        st.caption("This job had attached files. Attach them again in the request box and send it.")
+    else:
+        st.caption("Pick the work order again on the left, or describe the job in the request box.")
+
+
 def result_box(job: Job) -> None:
     if job.final_error is not None:
-        st.error(f"The job finished, but its result could not be loaded: {job.final_error.message}")
+        messages.show("The job finished, but its result could not be loaded", job.final_error)
         st.button("Load result again", key="reload_final", on_click=clear_final_error, args=(job,))
         return
     final = job.final
@@ -397,34 +436,132 @@ def result_box(job: Job) -> None:
         st.markdown(f'<div class="wb-result"><div class="wb-h">Result</div><div class="wb-meta">{total}</div>'
                     f'<div class="ans">{body}</div></div>', unsafe_allow_html=True)
     elif final.status == TaskStatus.FAILED:
-        msg = multiline(final.error.message if final.error else "No error details were reported.")
+        what = final.error.message if final.error else "No error details were reported."
+        advice = messages.ADVICE.get(final.error.code, "") if final.error else ""
         code = esc(final.error.code) if final.error else "FAILED"
         st.markdown(f'<div class="wb-result failed"><div class="wb-h c-alarm">Job failed ({code})</div>'
-                    f'<div class="wb-meta">{total}</div><div class="ans">{msg}</div></div>', unsafe_allow_html=True)
+                    f'<div class="wb-meta">{total}</div><div class="ans">{multiline(what)}</div>'
+                    f'<div class="ans">What to do: {esc(advice or "Run the job again.")}</div></div>',
+                    unsafe_allow_html=True)
     else:
         st.markdown(f'<div class="wb-result cancelled"><div class="wb-h">Job cancelled</div>'
                     f'<div class="wb-meta">{total}</div></div>', unsafe_allow_html=True)
 
 
+# ---------------------------------------------------------------- history + idle screen
+@dataclass
+class JobSummary:
+    task_id: str
+    status: str
+    work_order: Optional[str] = None
+    message: str = ""
+    elapsed_s: Optional[float] = None
+    files: list[str] = field(default_factory=list)
+    answer: str = ""
+    details_lost: bool = False
+
+
+def summary_of(state: TaskState, work_order: Optional[str] = None) -> JobSummary:
+    if work_order is None and state.scenario is not None:
+        work_order = get_scenario(state.scenario).work_order
+    answer = state.final_answer or (state.error.message if state.error else "")
+    return JobSummary(task_id=state.task_id, status=state.status.value, work_order=work_order,
+                      message=state.message, elapsed_s=state.elapsed_s,
+                      files=[a.filename for a in state.artifacts], answer=_first_line(answer, 200))
+
+
+def close_job() -> None:
+    job = get_job()
+    if job is not None and job.final is not None:
+        st.session_state.setdefault(HISTORY_KEY, []).append(summary_of(job.final, job.work_order))
+    set_job(None)
+    if TASK_QUERY_KEY in st.query_params:
+        del st.query_params[TASK_QUERY_KEY]
+
+
+def lookup_last_finished() -> Optional[JobSummary]:
+    """Newest task_finished record in the audit log, with its TaskState if the backend still has it."""
+    client = api_client.get_client()
+    result = client.audit(limit=AUDIT_LOOKBACK)
+    if result.data is None:
+        return None
+    rec = next((r for r in result.data if r.kind == "system" and r.name == "task_finished" and r.task_id), None)
+    if rec is None:
+        return None
+    state = client.get_task(rec.task_id)
+    if state.data is not None:
+        return summary_of(state.data)
+    return JobSummary(task_id=rec.task_id, status=str(rec.detail.get("status", "finished")), details_lost=True)
+
+
+def last_job() -> Optional[JobSummary]:
+    history = st.session_state.get(HISTORY_KEY) or []
+    if history:
+        return history[-1]
+    if LOOKUP_KEY not in st.session_state:
+        st.session_state[LOOKUP_KEY] = lookup_last_finished()
+    return st.session_state[LOOKUP_KEY]
+
+
+HOW_STEPS = [
+    ("Route", "The router picks the right local model for the job: document, code or drawing."),
+    ("Plan and work", "The agent reads files, searches the SOPs, writes code and tests it in the offline sandbox."),
+    ("Deliver", "You get a Word note, an Excel list or tested code to check and download."),
+]
+
+
+def how_html() -> str:
+    steps = "".join(f'<div class="s"><div class="n">{i}</div><div><div class="t">{esc(t)}</div>'
+                    f'<div class="d">{esc(d)}</div></div></div>' for i, (t, d) in enumerate(HOW_STEPS, start=1))
+    return f'<div class="wb-h" style="margin-top:14px">How a job runs</div><div class="wb-how">{steps}</div>'
+
+
+def last_job_html(summary: JobSummary) -> str:
+    label, css = STATE_STYLE.get(summary.status, (summary.status.capitalize(), "c-dim"))
+    wo = f'<span class="wb-meta">{esc(summary.work_order)}</span>' if summary.work_order else ""
+    took = f'<span class="wb-num wb-meta">{fmt_seconds(summary.elapsed_s)}</span>' if summary.elapsed_s else ""
+    files = f'<div class="files">Files: {esc(", ".join(summary.files))}</div>' if summary.files else ""
+    body = f'<div class="ans">{esc(summary.answer)}</div>' if summary.answer else ""
+    if summary.details_lost:
+        body = '<div class="files">Details are gone: the backend restarted after this job.</div>'
+    msg = f'<div class="files">{esc(_first_line(summary.message, 140))}</div>' if summary.message else ""
+    return (f'<div class="wb-h" style="margin-top:16px">Last finished job</div>'
+            f'<div class="wb-last {esc(summary.status)}"><div class="row"><span class="wb-num">'
+            f'<b>{esc(summary.task_id)}</b></span><span class="wb-state {css}">{label}</span>{wo}{took}</div>'
+            f'{msg}{body}{files}</div>')
+
+
 def idle_panel() -> None:
     st.markdown(process_line_html(build_stages([], [], None)), unsafe_allow_html=True)
-    st.markdown('<div class="wb-empty">No job running. Pick a work order on the left or describe the job below.</div>',
+    st.markdown('<div class="wb-empty">No job running. Pick a work order on the left or describe the job above.</div>',
                 unsafe_allow_html=True)
+    st.markdown(how_html(), unsafe_allow_html=True)
+    summary = last_job()
+    if summary is not None:
+        st.markdown(last_job_html(summary), unsafe_allow_html=True)
+        if not summary.details_lost and st.button("Open this job", key="open_last"):
+            set_job(Job(task_id=summary.task_id, message=summary.message, work_order=summary.work_order))
+            st.query_params[TASK_QUERY_KEY] = summary.task_id
+            st.rerun(scope="app")
 
 
-def job_panel() -> None:
+def job_panel(rerun: Optional[Callable[[Job], bool]] = None) -> None:
     job = get_job()
     if job is None:
         idle_panel()
         return
     if not job.done:
         poll_once(job)
-    if job.done and job.final is None and job.final_error is None:
+    if job.done and not job.lost and job.final is None and job.final_error is None:
         fetch_final(job)
 
-    header(job)
+    header(job, rerun)
+    if job.lost:
+        lost_box(job, rerun)
+        return
     if job.poll_error is not None:
-        st.warning(f"Lost contact with the backend ({job.poll_error.message}). Retrying every second.")
+        st.warning(messages.friendly("Lost contact with the backend", job.poll_error)
+                   + " The job panel keeps trying every second.")
     plan = plan_of(job)
     st.markdown(process_line_html(build_stages(job.events, plan, job.final, job.done)), unsafe_allow_html=True)
     left, right = st.columns(2, gap="medium")
@@ -434,7 +571,7 @@ def job_panel() -> None:
         plan_view.render(plan, job.events, job.final)
     result_box(job)
     st.markdown('<div class="wb-h" style="margin-top:8px">Event journal</div>', unsafe_allow_html=True)
-    with st.container(height=230, border=False, key="journal"):
+    with st.container(height=210, border=False, key="journal", autoscroll=False):
         if job.events:
             st.markdown(journal_html(job.events), unsafe_allow_html=True)
         else:
@@ -446,8 +583,8 @@ def job_panel() -> None:
         st.rerun(scope="app")  # refresh the deliverables tray once, with the final artifacts
 
 
-def render() -> None:
+def render(rerun: Optional[Callable[[Job], bool]] = None) -> None:
     """Draw the job panel; it polls every second (fragment) only while a job is active."""
     job = get_job()
     run_every = POLL_S if job is not None and job.active else None
-    st.fragment(job_panel, run_every=run_every)()
+    st.fragment(job_panel, run_every=run_every)(rerun)

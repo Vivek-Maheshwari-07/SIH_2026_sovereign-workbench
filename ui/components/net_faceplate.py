@@ -17,16 +17,18 @@ def faceplate_html(status: Optional[NetworkStatus], error: Optional[str] = None)
     count = status.external_seen_since_start
     alarm = count > 0 or status.external_count > 0
     css = "c-alarm" if alarm else "c-ok"
-    now = f" (open now: {status.external_count})" if status.external_count else ""
+    now_css = "c-alarm" if status.external_count else ""
     fw = status.firewall_outbound_blocked
     fw_text, fw_css = {True: ("blocked", "c-ok"), False: ("open", "c-warn"), None: ("unknown", "c-dim")}[fw]
     return (
         '<div class="wb-plate">'
-        f'<div title="Unique external connections made by the workbench since the backend started{now}">'
+        '<div title="Core external connections: the backend, its child processes, the Ollama model server and '
+        'this UI. Details on the Network screen.">'
         f'<div class="tag">NET-001</div><div class="val wb-num {css}">{count}</div>'
-        f'<div class="lbl">External connections{esc(now)}</div></div>'
+        '<div class="lbl">External since start</div>'
+        f'<div class="sub {now_css}">Open now {status.external_count}</div></div>'
         f'<div><div class="tag">FW-001</div><div class="val {fw_css}">{fw_text.capitalize()}</div>'
-        '<div class="lbl">Outbound firewall</div></div>'
+        '<div class="lbl">Outbound firewall</div><div class="sub">&nbsp;</div></div>'
         '</div>'
     )
 

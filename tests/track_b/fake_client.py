@@ -10,6 +10,8 @@ from typing import Any, Optional
 
 from shared.contracts import (
     CONTRACT_VERSION,
+    AuditRecord,
+    ProbeResult,
     AgentEvent,
     Artifact,
     ArtifactKind,
@@ -114,6 +116,11 @@ class FakeClient:
         self.cancelled: list[str] = []
         self.downloads: list[str] = []
         self.prewarm_calls = 0
+        self.audit_records: list[AuditRecord] = []
+        self.audit_calls: list[tuple[Optional[str], int]] = []
+        self.probe_result: ApiResult = ok(ProbeResult(target="https://www.google.com", reachable=False,
+                                                      error="connect timed out", duration_ms=3002))
+        self.probe_calls = 0
 
     # ---- health / network / admin
     def health(self) -> ApiResult:
@@ -125,6 +132,15 @@ class FakeClient:
     def prewarm(self) -> ApiResult:
         self.prewarm_calls += 1
         return ok(PrewarmResult(warmed=["general (9.1 s)", "coder (4.0 s)"], failed=[], duration_ms=13100))
+
+    def network_probe(self, request=None) -> ApiResult:
+        self.probe_calls += 1
+        return self.probe_result
+
+    def audit(self, task_id: Optional[str] = None, limit: int = 100) -> ApiResult:
+        self.audit_calls.append((task_id, limit))
+        rows = [r for r in self.audit_records if task_id is None or r.task_id == task_id]
+        return ok(rows[:limit])
 
     # ---- files / tasks
     def upload_file(self, filename: str, content: bytes, mime_type: str = "") -> ApiResult:

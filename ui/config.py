@@ -19,6 +19,7 @@ MODEL_TIMEOUT_S = 30.0  # /api/route and /api/kb/search (may load a cold model)
 LONG_TIMEOUT_S = 60.0   # uploads and /api/admin/prewarm
 
 HEALTH_REFRESH_S = 5.0  # sidebar health lights refresh
+BACKEND_RETRY_S = 3.0   # backend-down banner: check again this often, reload by itself when it answers
 # Upload types the backend accepts: must match ERROR_CODES["UNSUPPORTED_FILE"] in shared/contracts.py.
 ALLOWED_UPLOAD_TYPES = ["pdf", "png", "jpg", "jpeg", "txt", "md", "py", "csv", "xlsx", "docx"]
 # TaskCreate.message max_length, read from the contract so the chat box can never exceed it.
