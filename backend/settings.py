@@ -2,11 +2,22 @@
 Typed settings for Track A (backend). Loads every variable from `.env` at the
 repo root into one `Settings` object. Read config only through this module —
 never hard-code ports, paths or model names elsewhere (AGENTS.md rule 6).
+
+Sovereign guards, checked when the settings load (so the backend refuses to start):
+  * OLLAMA_HOST and WB_API_HOST must be loopback (127.x.x.x, ::1 or localhost). Every prompt and
+    every uploaded document goes to OLLAMA_HOST, so a mistyped .env must not send them off the
+    machine. WB_ALLOW_NON_LOOPBACK=true allows a model server on an air-gapped plant LAN.
+  * The telemetry kill switches in .env are exported to os.environ: libraries (Chroma, Hugging
+    Face, ...) read the process environment, not our Settings object.
 """
 from __future__ import annotations
 
+import ipaddress
+import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -73,5 +84,57 @@ class Settings(BaseSettings):
     STREAMLIT_BROWSER_GATHER_USAGE_STATS: bool = False
     DO_NOT_TRACK: bool = True
 
+    # ---- sovereign guard (not in .env.example: the safe default needs no entry)
+    WB_ALLOW_NON_LOOPBACK: bool = False
+
+    @model_validator(mode="after")
+    def _loopback_only(self) -> "Settings":
+        if self.WB_ALLOW_NON_LOOPBACK:
+            return self
+        ollama_host = urlsplit(self.OLLAMA_HOST if "://" in self.OLLAMA_HOST else f"http://{self.OLLAMA_HOST}").hostname
+        for key, host in (("OLLAMA_HOST", ollama_host), ("WB_API_HOST", self.WB_API_HOST)):
+            if not is_loopback_host(host):
+                raise ValueError(f"{key} must point to this machine (127.0.0.1 or localhost), got {host!r}. "
+                                 "Sovereign rule: prompts and documents never leave the computer. "
+                                 "Set WB_ALLOW_NON_LOOPBACK=true only for a model server on an air-gapped LAN.")
+        return self
+
+
+TELEMETRY_KEYS = ("ANONYMIZED_TELEMETRY", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_HUB_DISABLE_TELEMETRY",
+                  "STREAMLIT_BROWSER_GATHER_USAGE_STATS", "DO_NOT_TRACK")
+
+
+def is_loopback_host(host: object) -> bool:
+    """True for localhost and loopback IPs (127.0.0.0/8, ::1). Anything else, including None, is False."""
+    if not isinstance(host, str) or not host:
+        return False
+    if host.strip("[]").lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def telemetry_env(values: Settings) -> dict[str, str]:
+    """The kill switches as environment strings ("1"/"0"; "False"/"true" styles where the library expects them)."""
+    env: dict[str, str] = {}
+    for key in TELEMETRY_KEYS:
+        value = bool(getattr(values, key))
+        if key == "ANONYMIZED_TELEMETRY":
+            env[key] = str(value)                      # Chroma: "False"
+        elif key.startswith("STREAMLIT_"):
+            env[key] = str(value).lower()              # Streamlit: "false"
+        else:
+            env[key] = "1" if value else "0"
+    return env
+
+
+def export_telemetry_env(values: Settings) -> None:
+    """Put the kill switches into os.environ, without overriding a value the shell already set."""
+    for key, value in telemetry_env(values).items():
+        os.environ.setdefault(key, value)
+
 
 settings = Settings()
+export_telemetry_env(settings)

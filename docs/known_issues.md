@@ -48,3 +48,36 @@ See `docs/perf.md`, section "Scenario A quality fix", for what was fixed and mea
   mode is not under the 5-minute target, but it should be re-measured before the demo.
 - **Warm reruns are faster than the demo will be.** A second run of the same file takes 100-139 s
   because Ollama reuses the processed prompt. A new file at the demo takes ~210-230 s.
+
+## Evaluation pass: general agent tools (2026-09-27)
+
+New tools `answer_question`, `create_document` (Word/PowerPoint), `analyze_table` (CSV/Excel) and
+`inspect_image` (photos, handwriting). Measured through the real API in Agent mode on the demo
+laptop (models warm), with the prompts of the UI's "Try an example request" buttons:
+
+| Request | Before | After |
+|---|---|---|
+| "What does our SOP say about H2S exposure limits and what PPE is needed?" | succeeded, but the answer named internal ids (kb_2, kb_4) and no limits | 374 s; states IDLH 100 ppm, SCBA 30 min, air testing, with [n] citations to the OSHA pages |
+| "Make a short PowerPoint deck for the shift briefing on H2S safety" | "succeeded" with no file (no PowerPoint tool) | 333 s; 8-slide .pptx, every bullet from the OSHA H2S pages, Sources slide |
+| Wall-loss analysis of `equipment_thickness.csv` | failed, AGENT_TIMEOUT after 784 s | 141 s; Excel (Result + Input data) and the analysis script |
+| "Read this handwritten shift-round note ..." (`field_note_handwritten.jpg`) | no tool to look at a photo | 199 s; all 8 handwritten lines read correctly |
+
+Open points:
+- **CPU speed.** One free-form request takes 2.5-6 minutes; the longest single call is the
+  grounded answer or the deck outline (~190 s for ~600 output tokens at ~3 tokens/s). Each agent
+  step (choosing the next tool) costs 20-70 s because the 10 tool schemas are part of the prompt.
+  A GPU server (the production target) removes most of this.
+- **Code quality of the 3B coder on tables.** In the first CSV run the model flagged two items at
+  exactly 15.0 % as "above 15 %" (float noise, 15.000000000000002) and printed the first row as the
+  "highest loss". The prompt now asks it to round before comparing and to sort the result; the
+  Excel writer drops float noise; the demo CSV has no value on the 15 % boundary. The generated
+  script is always delivered next to the result so an engineer can check the logic.
+- **The agent retells answers.** Small models rewrite a grounded answer in their own words and drop
+  its citations. `final_answer` keeps the checked answer when the retelling has no citations (and
+  adds the Sources list when the job produced files). Image answers keep the model's wording.
+- **Vision reads, it does not measure.** `inspect_image` describes and transcribes what it sees;
+  it cannot size a defect or read an unclear gauge reliably. Every image answer says to check the
+  original.
+- **Agent-mode fallback is narrower on purpose.** A free-form request only falls back to a fixed
+  pipeline when the request fits it (see `guided.fits_request`). A request that fits none of them
+  and fails ends with the error instead of a pipeline the user did not ask for.

@@ -255,7 +255,7 @@ def test_bad_plan_json_twice_uses_default_plan(monkeypatch, store):
     use_fake(monkeypatch, FakeOllama([("tool", "finish", {"answer": "ok"})], {"_Plan": ["not json", "{}"]}))
     state, events = run_task(store, "Explain LOTO")
     assert state.status == TaskStatus.SUCCEEDED
-    assert [p.tool for p in state.plan] == ["search_knowledge", "finish"]
+    assert [p.tool for p in state.plan] == ["answer_question", "finish"]
     assert any("default plan" in w for w in _warns(events))
 
 
@@ -459,15 +459,22 @@ def test_context_trimming_keeps_pinned_messages():
 
 
 def test_default_plan_per_task_type():
-    assert [s.tool for s in agent.default_plan(TaskType.VISION, True)] == ["read_document", "extract_pid_tags", "finish"]
-    assert [s.tool for s in agent.default_plan(TaskType.CODING, False)] == ["run_code_task", "finish"]
+    tools = lambda *args: [s.tool for s in agent.default_plan(*args)]  # noqa: E731
+    assert tools(TaskType.VISION, True, "List the tags on this P&ID") == ["read_document", "extract_pid_tags", "finish"]
+    assert tools(TaskType.VISION, True, "Is this flange corroded?") == ["inspect_image", "finish"]
+    assert tools(TaskType.CODING, False) == ["run_code_task", "finish"]
+    assert tools(TaskType.DOCUMENT, True, "Draft an approval note") == [
+        "read_document", "search_knowledge", "draft_approval_note", "finish"]
+    assert tools(TaskType.DOCUMENT, True, "Summarise this manual") == ["read_document", "answer_question", "finish"]
+    assert tools(TaskType.GENERAL, False) == ["answer_question", "finish"]
     assert all(isinstance(s, PlanStep) for s in agent.default_plan(TaskType.DOCUMENT, True))
 
 
 def test_tool_definitions_format():
     defs = agent_tools.tool_definitions()
     assert [d["function"]["name"] for d in defs] == ["read_document", "search_knowledge", "draft_approval_note",
-                                                      "extract_pid_tags", "run_code_task", "finish"]
+                                                      "extract_pid_tags", "run_code_task", "answer_question",
+                                                      "create_document", "analyze_table", "inspect_image", "finish"]
     for d in defs:
         assert d["type"] == "function" and d["function"]["parameters"]["type"] == "object"
         assert set(d["function"]["parameters"]["required"]) <= set(d["function"]["parameters"]["properties"])
@@ -884,3 +891,19 @@ def test_model_cited_sop_references_have_no_auto_label(monkeypatch, store, repor
     state, _ = run_task(store, "Draft note", [report_file_id])
     paragraphs = [p.text for p in _docx_of(state).paragraphs]
     assert office.SOP_AUTO_NOTE not in paragraphs and not any("{{" in p for p in paragraphs)
+
+
+def test_free_request_naming_the_file_falls_back_when_the_agent_skips_it(monkeypatch, store, report_file_id):
+    use_fake(monkeypatch, FakeOllama([("tool", "finish", {"answer": "Read it, looks fine."})],
+                                     {"_Plan": [plan_json("finish")], "ApprovalNote": [note_json()]}))
+    state, events = run_task(store, "Draft an approval note from this inspection report", [report_file_id])
+    assert state.status == TaskStatus.SUCCEEDED
+    assert any("no docx file" in w for w in _warns(events)) and state.artifacts[0].kind == "docx"
+
+
+def test_free_question_about_a_report_is_not_turned_into_a_note(monkeypatch, store, report_file_id):
+    use_fake(monkeypatch, FakeOllama([("tool", "finish", {"answer": "It has one high finding."})],
+                                     {"_Plan": [plan_json("finish")]}))
+    state, events = run_task(store, "How many findings are in this inspection report?", [report_file_id])
+    assert state.status == TaskStatus.SUCCEEDED and state.final_answer == "It has one high finding."
+    assert not state.artifacts and not any(agent.FALLBACK_MESSAGE in w for w in _warns(events))

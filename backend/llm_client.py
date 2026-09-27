@@ -2,15 +2,21 @@
 Ollama LLM client for Track A. Every model call in the backend goes through
 one of the three functions here, so timeouts, retries, audit logging and
 error codes stay consistent (AGENTS.md rule 6: config only via settings).
+
+A task runs its model calls inside call_scope(task_id, deadline): every audit
+record then carries the task id, and no call may wait past the task's
+deadline (WB_AGENT_TIMEOUT_S), so one slow call cannot overrun the job.
 """
 from __future__ import annotations
 
 import json
 import re
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Iterator, Optional, Union
 
 import httpx
 import ollama
@@ -33,6 +39,9 @@ ImageInput = Union[str, bytes, Path]
 # when the demo starts later and no scenario pays a reload (qwen3.5:4b: ~9 s).
 # No .env key exists for this, so it is a named constant.
 OLLAMA_KEEP_ALIVE = "30m"
+MIN_CALL_TIMEOUT_S = 5.0    # a capped call still gets this long, so a nearly-used budget fails cleanly
+
+_scope = threading.local()  # (task_id, monotonic deadline) of the task running on this thread
 
 
 class LLMError(Exception):
@@ -56,8 +65,44 @@ def _resolve(path: Path) -> Path:
     return path if path.is_absolute() else _REPO_ROOT / path
 
 
+@contextmanager
+def call_scope(task_id: Optional[str], deadline: Optional[float] = None) -> Iterator[None]:
+    """Model calls on this thread belong to `task_id` and must end by `deadline` (time.monotonic())."""
+    previous = getattr(_scope, "value", None)
+    _scope.value = (task_id, deadline)
+    try:
+        yield
+    finally:
+        _scope.value = previous
+
+
+def current_task_id() -> Optional[str]:
+    value = getattr(_scope, "value", None)
+    return value[0] if value else None
+
+
+def remaining_s() -> Optional[float]:
+    """Seconds left before the current task's deadline; None outside a task or without a deadline."""
+    value = getattr(_scope, "value", None)
+    if not value or value[1] is None:
+        return None
+    return value[1] - time.monotonic()
+
+
+def capped_timeout(timeout_s: float) -> float:
+    """`timeout_s`, shortened to the time the current task has left (never below MIN_CALL_TIMEOUT_S)."""
+    left = remaining_s()
+    if left is None:
+        return timeout_s
+    return max(MIN_CALL_TIMEOUT_S, min(timeout_s, left))
+
+
+def _audit(**fields: Any) -> None:
+    write_audit_record(kind="llm", target=settings.OLLAMA_HOST, task_id=current_task_id(), **fields)
+
+
 def _client(timeout_s: Optional[float] = None) -> ollama.Client:
-    return ollama.Client(host=settings.OLLAMA_HOST, timeout=timeout_s or settings.WB_LLM_TIMEOUT_S)
+    return ollama.Client(host=settings.OLLAMA_HOST, timeout=capped_timeout(timeout_s or settings.WB_LLM_TIMEOUT_S))
 
 
 def _options() -> dict[str, Any]:
@@ -121,6 +166,9 @@ def _call_with_retry(fn: Callable[[], Any], *, purpose: str, model_id: str) -> t
     last_code = "MODEL_UNAVAILABLE"
 
     for attempt in range(attempts):
+        left = remaining_s()
+        if left is not None and left <= 0:
+            raise LLMError("MODEL_TIMEOUT", f"{model_id}: the task's time budget is used up ({purpose})")
         start = time.monotonic()
         try:
             result = fn()
@@ -130,28 +178,15 @@ def _call_with_retry(fn: Callable[[], Any], *, purpose: str, model_id: str) -> t
             last_exc, last_code = exc, "MODEL_UNAVAILABLE"
         except ollama.ResponseError as exc:
             duration_ms = int((time.monotonic() - start) * 1000)
-            write_audit_record(
-                kind="llm",
-                name=model_id,
-                target=settings.OLLAMA_HOST,
-                duration_ms=duration_ms,
-                ok=False,
-                detail={"purpose": purpose, "error": str(exc)},
-            )
+            _audit(name=model_id, duration_ms=duration_ms, ok=False, detail={"purpose": purpose, "error": str(exc)})
             raise LLMError("MODEL_UNAVAILABLE", f"Ollama error for {model_id}: {exc}") from exc
         else:
             duration_ms = int((time.monotonic() - start) * 1000)
             return result, duration_ms
 
         duration_ms = int((time.monotonic() - start) * 1000)
-        write_audit_record(
-            kind="llm",
-            name=model_id,
-            target=settings.OLLAMA_HOST,
-            duration_ms=duration_ms,
-            ok=False,
-            detail={"purpose": purpose, "error": str(last_exc), "attempt": attempt + 1},
-        )
+        _audit(name=model_id, duration_ms=duration_ms, ok=False,
+               detail={"purpose": purpose, "error": str(last_exc), "attempt": attempt + 1})
 
     raise LLMError(
         last_code,
@@ -166,6 +201,7 @@ def chat(
     images: Optional[list[ImageInput]] = None,
     *,
     purpose: str = "chat",
+    timeout_s: Optional[float] = None,
 ) -> ChatResult:
     """
     Send a chat turn to `model_id`. Returns the text reply and any tool
@@ -173,6 +209,7 @@ def chat(
     if the model wrote them as plain text instead).
 
     `images` are attached to the last message, which must have role "user".
+    `timeout_s` replaces WB_LLM_TIMEOUT_S for this call only (a call known to need longer).
     """
     ollama_messages = [dict(m) for m in messages]
     if images:
@@ -180,7 +217,7 @@ def chat(
             raise LLMError("BAD_REQUEST", "images must be attached to a trailing user message")
         ollama_messages[-1] = {**ollama_messages[-1], "images": list(images)}
 
-    client = _client()
+    client = _client(timeout_s) if timeout_s else _client()
 
     def _do_call():
         return client.chat(
@@ -205,14 +242,8 @@ def chat(
         if fallback:
             tool_calls = [fallback]
 
-    write_audit_record(
-        kind="llm",
-        name=model_id,
-        target=settings.OLLAMA_HOST,
-        duration_ms=duration_ms,
-        ok=True,
-        detail={"purpose": purpose, "tokens_out": response.eval_count},
-    )
+    _audit(name=model_id, duration_ms=duration_ms, ok=True,
+           detail={"purpose": purpose, "tokens_out": response.eval_count})
 
     return ChatResult(text=text, tool_calls=tool_calls, tokens_out=_tokens_out(response))
 
@@ -279,14 +310,8 @@ def chat_json_meta(
             result = schema.model_validate_json(content)
         except ValidationError as exc:
             last_error = exc
-            write_audit_record(
-                kind="llm",
-                name=model_id,
-                target=settings.OLLAMA_HOST,
-                duration_ms=duration_ms,
-                ok=False,
-                detail={"purpose": purpose, "error": "schema validation failed", "attempt": attempt + 1},
-            )
+            _audit(name=model_id, duration_ms=duration_ms, ok=False,
+                   detail={"purpose": purpose, "error": "schema validation failed", "attempt": attempt + 1})
             conversation.append({"role": "assistant", "content": content})
             conversation.append(
                 {
@@ -300,14 +325,8 @@ def chat_json_meta(
             )
             continue
 
-        write_audit_record(
-            kind="llm",
-            name=model_id,
-            target=settings.OLLAMA_HOST,
-            duration_ms=duration_ms,
-            ok=True,
-            detail={"purpose": purpose, "tokens_out": response.eval_count},
-        )
+        _audit(name=model_id, duration_ms=duration_ms, ok=True,
+               detail={"purpose": purpose, "tokens_out": response.eval_count})
         return JsonResult(value=result, tokens_out=_tokens_out(response), duration_ms=total_ms)
 
     raise LLMError(
@@ -326,14 +345,8 @@ def embed(texts: list[str], *, purpose: str = "embed") -> list[list[float]]:
 
     response, duration_ms = _call_with_retry(_do_call, purpose=purpose, model_id=model_name)
 
-    write_audit_record(
-        kind="llm",
-        name=model_name,
-        target=settings.OLLAMA_HOST,
-        duration_ms=duration_ms,
-        ok=True,
-        detail={"purpose": purpose, "tokens_out": response.eval_count, "count": len(texts)},
-    )
+    _audit(name=model_name, duration_ms=duration_ms, ok=True,
+           detail={"purpose": purpose, "tokens_out": response.eval_count, "count": len(texts)})
 
     return [list(vector) for vector in response.embeddings]
 
@@ -352,11 +365,17 @@ def load_model(model_name: str, *, embedding: bool = False) -> int:
         return client.generate(model=model_name, prompt="", options=_options(), keep_alive=OLLAMA_KEEP_ALIVE)
 
     _, duration_ms = _call_with_retry(_do_call, purpose="prewarm", model_id=model_name)
-    write_audit_record(kind="llm", name=model_name, target=settings.OLLAMA_HOST, duration_ms=duration_ms,
-                       ok=True, detail={"purpose": "prewarm"})
+    _audit(name=model_name, duration_ms=duration_ms, ok=True, detail={"purpose": "prewarm"})
     return duration_ms
 
 
-def loaded_models() -> list[str]:
+def loaded_models(timeout_s: Optional[float] = None) -> list[str]:
     """Ollama model names currently in RAM (`ollama ps`), most recently used first as Ollama lists them."""
-    return [m.model for m in _client().ps().models]
+    return [m.model for m in (_client(timeout_s) if timeout_s else _client()).ps().models]
+
+
+def same_model(a: str, b: str) -> bool:
+    """'bge-m3' and 'bge-m3:latest' name the same Ollama model."""
+    def full(name: str) -> str:
+        return name if ":" in name else f"{name}:latest"
+    return full(a.strip()) == full(b.strip())

@@ -597,6 +597,17 @@ def _load_first_page_as_image(path: Path, suffix: str) -> Image.Image:
     return Image.open(path).convert("RGB")
 
 
+def vision_png(path: Path) -> bytes:
+    """An image (or a PDF's first page) as PNG bytes, resized to WB_VISION_MAX_PX for the vision model."""
+    try:
+        image = _load_first_page_as_image(path, path.suffix.lower())
+    except DocumentExtractionError:
+        raise
+    except Exception as exc:
+        raise DocumentExtractionError("UNSUPPORTED_FILE", f"could not open image: {exc}") from exc
+    return _image_to_png_bytes(_resize_for_vision(image))
+
+
 def _resolve_source(source: Union[str, Path]) -> Path:
     if isinstance(source, Path):
         return source

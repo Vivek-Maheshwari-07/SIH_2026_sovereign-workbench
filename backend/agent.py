@@ -52,11 +52,16 @@ How you work:
 - Call exactly ONE tool per reply. Wait for its result before the next step.
 - Tool results are short summaries with ids (doc_1, kb_1, note_1). Pass these ids to later tools.
 - Only use file_ids listed in the task. Never invent file names, SOP names, page numbers or amounts.
-- For an inspection report: read_document -> search_knowledge -> draft_approval_note -> finish.
-- For a P&ID drawing: read_document with kind "pid" -> extract_pid_tags -> finish.
+- For an inspection report -> approval note: read_document -> search_knowledge -> draft_approval_note -> finish.
+- For a P&ID drawing -> tag list: read_document with kind "pid" -> extract_pid_tags -> finish.
 - For a calculation or code request: run_code_task -> finish.
-- For a simple question: search_knowledge if an SOP may help, then finish.
-- When done, call finish with a short answer for the user that names any files produced.
+- For a CSV or Excel file to analyse: analyze_table -> finish.
+- For a photo, sketch or handwritten note: inspect_image with the user's question -> finish.
+- For a question about SOPs, manuals or an attached document (including "summarise"): read_document for each
+  attached file, then answer_question -> finish with its answer.
+- For a Word report or a PowerPoint deck: collect the content first (answer_question or read_document),
+  then create_document with format "docx" or "pptx" -> finish.
+- When done, call finish with the answer for the user; name any files produced.
 - If a tool returns an error, fix the arguments or choose another step; do not repeat the same failing call."""
 
 PLAN_PROMPT = f"""Make a short plan (at most {MAX_PLAN_STEPS} steps, as few as possible) for the task below.
@@ -65,6 +70,10 @@ Typical plans:
 - inspection report -> approval note: read_document, search_knowledge, draft_approval_note, finish
 - P&ID drawing -> tag list: read_document (kind pid), extract_pid_tags, finish
 - calculation / code: run_code_task, finish
+- CSV / Excel analysis: analyze_table, finish
+- photo or handwritten note: inspect_image, finish
+- question about SOPs or a document: (read_document for attached files), answer_question, finish
+- Word report / PowerPoint deck: answer_question (or read_document), create_document, finish
 The last step is finish. Do not add extra checking or conversion steps."""
 
 
@@ -94,13 +103,16 @@ class AgentStop(Exception):
 
 
 # ------------------------------------------------------------------ helpers
-def default_plan(task_type: TaskType, has_files: bool) -> list[PlanStep]:
+def default_plan(task_type: TaskType, has_files: bool, message: str = "") -> list[PlanStep]:
+    text = message.lower()
+    wants_note = any(word in text for word in guided.INSPECTION_WORDS)
+    wants_tags = any(word in text for word in guided.PID_WORDS)
     tools_by_type = {
-        TaskType.DOCUMENT: ["read_document", "search_knowledge", "draft_approval_note"] if has_files
-        else ["search_knowledge"],
-        TaskType.VISION: ["read_document", "extract_pid_tags"],
+        TaskType.DOCUMENT: (["read_document", "search_knowledge", "draft_approval_note"] if wants_note
+                            else ["read_document", "answer_question"]) if has_files else ["answer_question"],
+        TaskType.VISION: ["read_document", "extract_pid_tags"] if wants_tags else ["inspect_image"],
         TaskType.CODING: ["run_code_task"],
-        TaskType.GENERAL: ["search_knowledge"],
+        TaskType.GENERAL: ["answer_question"],
     }
     tools = tools_by_type.get(task_type, []) + ["finish"]
     return [PlanStep(index=i, title=tool.replace("_", " ").capitalize(), tool=tool) for i, tool in enumerate(tools, 1)]
@@ -219,7 +231,7 @@ class AgentRun:
         except llm_client.LLMError as exc:
             if exc.code != "BAD_MODEL_OUTPUT":
                 raise AgentStop(exc.code, str(exc)) from exc
-            plan = default_plan(decision.task_type, bool(self.handle.file_ids))
+            plan = default_plan(decision.task_type, bool(self.handle.file_ids), self.handle.message)
             self.log("warn", "The model's plan was not valid JSON twice; using a default plan.")
         self.checkpoint()
         self.handle.set_plan(plan)
@@ -311,7 +323,8 @@ class AgentRun:
 
     def run(self) -> None:
         decision = self.do_route()
-        scenario = guided.pick_scenario(self.handle.scenario, decision, self.handle.file_ids)
+        scenario = guided.pick_scenario(self.handle.scenario, decision, self.handle.file_ids,
+                                        message=self.handle.message, strict=self.handle.mode == TaskMode.AGENT)
         self.scenario = scenario
         if self.handle.mode == TaskMode.GUIDED:
             if scenario is None:
@@ -329,22 +342,39 @@ class AgentRun:
                 self.log("warn", f"{FALLBACK_MESSAGE} (reason: {stop.code})")
                 answer = self.run_guided(scenario)
             else:
-                # Only for an explicitly requested scenario: an agent that "finishes" without the
-                # deliverable the user asked for gets the guided flow too.
-                if (GUIDED_FALLBACK and self.handle.scenario is not None
-                        and not guided.has_expected_artifact(self.ctx.artifacts, self.handle.scenario)):
-                    self.log("warn", f"{FALLBACK_MESSAGE} (reason: no {guided.EXPECTED_ARTIFACT[self.handle.scenario].value} file)")
-                    answer = self.run_guided(self.handle.scenario)
+                # An agent that "finishes" without the file the user asked for gets the guided flow too:
+                # for a chosen work order, or for a free-form request that fits a scenario and names
+                # its file ("... into an Excel tag list"). The model is not deterministic; the file is.
+                wanted = self.handle.scenario or (
+                    scenario if guided.asks_for_deliverable(scenario, self.handle.message) else None)
+                if (GUIDED_FALLBACK and wanted is not None
+                        and not guided.has_expected_artifact(self.ctx.artifacts, wanted)):
+                    self.log("warn", f"{FALLBACK_MESSAGE} (reason: no {guided.EXPECTED_ARTIFACT[wanted].value} file)")
+                    answer = self.run_guided(wanted)
         self.handle.set_final_answer(answer)
         self.emit(EventType.FINAL, "Done", {"answer": answer})
+
+
+def stop_code(stop: AgentStop, elapsed_s: float) -> tuple[str, str]:
+    """A model call cut short because the task's time budget ran out is an AGENT_TIMEOUT, not a slow model."""
+    if stop.code == "MODEL_TIMEOUT" and elapsed_s >= settings.WB_AGENT_TIMEOUT_S - llm_client.MIN_CALL_TIMEOUT_S:
+        return "AGENT_TIMEOUT", f"Task exceeded {settings.WB_AGENT_TIMEOUT_S} s."
+    return stop.code, str(stop)
 
 
 def run(handle: TaskHandle) -> None:
     """Task-store entry point. Never raises for expected stops; the worker survives anything else."""
     agent = AgentRun(handle)
+    deadline = agent.started + settings.WB_AGENT_TIMEOUT_S
+    with llm_client.call_scope(handle.task_id, deadline):
+        run_with_scope(agent, handle)
+
+
+def run_with_scope(agent: AgentRun, handle: TaskHandle) -> None:
     try:
         agent.run()
-    except AgentStop as stop:
+    except AgentStop as original:
+        stop = AgentStop(*stop_code(original, time.monotonic() - agent.started))
         error = ErrorInfo(code=stop.code, message=str(stop), retryable=stop.code != "CANCELLED")
         handle.emit(EventType.ERROR, stop.code.replace("_", " ").capitalize(), {"error": error.model_dump()},
                     step=agent.step or None)

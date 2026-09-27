@@ -54,7 +54,7 @@ $ApiPort = [int](Get-Setting "WB_API_PORT" "8000")
 $UiPort = [int](Get-Setting "WB_UI_PORT" "8501")
 $OllamaUrl = (Get-Setting "OLLAMA_HOST" "http://127.0.0.1:11434").TrimEnd("/")
 $SandboxImage = Get-Setting "WB_SANDBOX_IMAGE" "wb-sandbox:1.0"
-$OfflineKitTar = "C:\projects\offline_kit\wb-sandbox.tar"
+$OfflineKitTar = Join-Path $Repo "offline_kit\wb-sandbox.tar"   # offline_kit\ is git-ignored
 $ApiUrl = "http://127.0.0.1:$ApiPort"
 $UiUrl = "http://127.0.0.1:$UiPort"
 

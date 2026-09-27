@@ -83,3 +83,42 @@ SCENARIOS: list[DemoScenario] = [
 
 def get_scenario(scenario: Scenario) -> DemoScenario:
     return next(s for s in SCENARIOS if s.scenario == scenario)
+
+
+# ---------------------------------------------------------------- example requests (Agent mode)
+@dataclass(frozen=True)
+class ExampleRequest:
+    """A one-click free-form request that shows a general capability (no fixed pipeline behind it)."""
+    key: str
+    label: str                           # button text
+    shows: str                           # tooltip: the capability it demonstrates
+    prompt: str
+    demo_file: Optional[Path] = None
+    mime_type: Optional[str] = None
+
+
+# Prompts as run end to end against the real backend in the evaluation pass (docs/known_issues.md).
+EXAMPLES: list[ExampleRequest] = [
+    ExampleRequest(
+        key="ask_sop", label="Ask the SOPs",
+        shows="Searches the offline SOP library and answers with page citations.",
+        prompt="What does our SOP say about H2S exposure limits and what PPE is needed?",
+    ),
+    ExampleRequest(
+        key="deck", label="Briefing deck",
+        shows="Builds a PowerPoint deck from the SOP library.",
+        prompt="Make a short PowerPoint deck for the shift briefing on H2S safety precautions.",
+    ),
+    ExampleRequest(
+        key="table", label="Analyse a table",
+        shows="The code model writes pandas code, runs it in the offline sandbox, and returns Excel.",
+        prompt="Compute the wall loss percentage for each item and flag anything above 15 percent loss.",
+        demo_file=DEMO_INPUTS_DIR / "equipment_thickness.csv", mime_type="text/csv",
+    ),
+    ExampleRequest(
+        key="note", label="Read handwriting",
+        shows="The vision model reads a photographed handwritten field note.",
+        prompt="Read this handwritten shift-round note and list the problems found and the actions needed.",
+        demo_file=DEMO_INPUTS_DIR / "field_note_handwritten.jpg", mime_type="image/jpeg",
+    ),
+]

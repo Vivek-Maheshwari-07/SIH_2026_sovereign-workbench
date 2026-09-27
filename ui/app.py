@@ -4,9 +4,10 @@ Streamlit UI (Track B): "control room" layout.
 Run:  python -m streamlit run ui/app.py --server.address 127.0.0.1 --server.port 8501
 
 Header band: title, one line of what it does, air-gap / NET-001 / firewall chips (5 s); screen switch below.
-Sidebar: work orders, mode, status lamps with fix hints (5 s), prewarm, reset.
-Workbench: request box, live job panel (B4, 1 s while a job runs), deliverables tray (B5). Network (B7, 2 s) and Audit (B7) screens. Resilience (B8): backend-down banner
+Sidebar: work orders, mode, status lamps with fix hints and the model registry (5 s), prewarm, reset.
+Workbench: request box, example requests (idle), live job panel (B4, 1 s while a job runs), deliverables tray (B5). Network (B7, 2 s) and Audit (B7) screens. Resilience (B8): backend-down banner
 that re-checks every 3 s and recovers by itself, contract-version banner, friendly errors.
+Sovereign guard: if WB_API_URL is not this machine, the page refuses to talk to it at all.
 All backend calls go through ui.api_client, which never raises.
 """
 from __future__ import annotations
@@ -22,7 +23,7 @@ if str(_REPO_ROOT) not in sys.path:  # `streamlit run ui/app.py` puts ui/ on sys
 
 import streamlit as st  # noqa: E402
 
-from shared.contracts import CONTRACT_VERSION, HealthResponse, Scenario, TaskCreate, TaskMode  # noqa: E402
+from shared.contracts import CONTRACT_VERSION, HealthResponse, ModelInfo, Scenario, TaskCreate, TaskMode  # noqa: E402
 from ui import api_client, messages  # noqa: E402
 from ui.api_client import ApiClient, ApiResult  # noqa: E402
 from ui.components import artifacts, audit_page, header_band, network_panel, theme, timeline  # noqa: E402
@@ -32,8 +33,9 @@ from ui.config import (  # noqa: E402
     BACKEND_RETRY_S,
     HEALTH_REFRESH_S,
     MAX_MESSAGE_CHARS,
+    is_local_url,
 )
-from ui.scenarios import SCENARIOS, DemoScenario, get_scenario  # noqa: E402
+from ui.scenarios import EXAMPLES, SCENARIOS, DemoScenario, ExampleRequest, get_scenario  # noqa: E402
 
 PAGE_TITLE = header_band.TITLE
 FOOTER = "Runs 100% offline on this machine."
@@ -98,20 +100,33 @@ def upload(filename: str, content: bytes, mime_type: str) -> Optional[str]:
     return result.data.file_id
 
 
+def upload_demo_file(demo_file: Optional[Path], mime_type: Optional[str]) -> Optional[list[str]]:
+    """[file_id] for a demo input ([] when there is none); None (after an error message) on failure."""
+    if demo_file is None:
+        return []
+    try:
+        content = demo_file.read_bytes()
+    except OSError as exc:
+        st.error(f"The demo file {demo_file.name} could not be read ({exc.strerror or exc}). "
+                 "Check that demo/inputs/ is complete.")
+        return None
+    file_id = upload(demo_file.name, content, mime_type or "application/octet-stream")
+    return None if file_id is None else [file_id]
+
+
 def run_scenario(scn: DemoScenario, mode: Optional[TaskMode] = None) -> bool:
-    file_ids: list[str] = []
-    if scn.demo_file is not None:
-        try:
-            content = scn.demo_file.read_bytes()
-        except OSError as exc:
-            st.error(f"The demo file {scn.demo_file.name} could not be read ({exc.strerror or exc}). "
-                     "Check that demo/inputs/ is complete.")
-            return False
-        file_id = upload(scn.demo_file.name, content, scn.mime_type or "application/octet-stream")
-        if file_id is None:
-            return False
-        file_ids.append(file_id)
+    file_ids = upload_demo_file(scn.demo_file, scn.mime_type)
+    if file_ids is None:
+        return False
     return start_task(scn.prompt, file_ids, mode or current_mode(), scn)
+
+
+def run_example(example: ExampleRequest) -> bool:
+    """Examples are free-form requests: always Agent mode, the model plans the steps."""
+    file_ids = upload_demo_file(example.demo_file, example.mime_type)
+    if file_ids is None:
+        return False
+    return start_task(example.prompt, file_ids, TaskMode.AGENT, None)
 
 
 def rerun_job(job: timeline.Job) -> bool:
@@ -174,6 +189,19 @@ def health_lamps(health: HealthResponse) -> str:
     ])
 
 
+def models_html(models: list[ModelInfo]) -> str:
+    """The model registry: one row per model with what it is for and whether it is in memory now."""
+    rows = []
+    for m in models:
+        role = ", ".join(t.value for t in m.tasks) or "embeddings (search)"
+        state = "in memory" if m.loaded else "on disk"
+        rows.append(f'<div class="wb-lamp"><i class="{"b-ok" if m.loaded else "b-off"} m"></i>'
+                    f'<span><b class="wb-num">{esc(m.id)}</b> <span class="why">{esc(m.ollama_name)} · {esc(state)}'
+                    f'</span><span class="role">{esc(role)}</span></span></div>')
+    return ('<div class="wb-h" style="margin-top:12px">Models</div>' + "".join(rows)
+            + '<div class="wb-meta">Local, open-weight. Add one in config/models.yaml.</div>')
+
+
 @st.fragment(run_every=HEALTH_REFRESH_S)
 def health_panel() -> None:
     st.markdown('<div class="wb-h">System status</div>', unsafe_allow_html=True)
@@ -183,7 +211,7 @@ def health_panel() -> None:
     if result.data is None:
         messages.show("The health check failed", result.error, result.failure)
     else:
-        st.markdown(health_lamps(result.data), unsafe_allow_html=True)
+        st.markdown(health_lamps(result.data) + models_html(result.data.models), unsafe_allow_html=True)
 
 
 def selected_work_order() -> tuple[Optional[str], str]:
@@ -274,17 +302,28 @@ def send_message(prompt: str, files: list) -> None:
         st.rerun()
 
 
+def examples_row() -> None:
+    """One-click free-form requests (Agent mode) for what the work orders do not show."""
+    st.markdown('<div class="wb-h" style="margin-top:10px">Try an example request</div>', unsafe_allow_html=True)
+    for col, example in zip(st.columns(len(EXAMPLES)), EXAMPLES):
+        if col.button(example.label, key=f"ex_{example.key}", help=example.shows, width="stretch"):
+            if run_example(example):
+                st.rerun()
+
+
 def tray_panel() -> None:
     job = timeline.get_job()
     artifacts.tray(timeline.artifacts_of(job) if job else [])
 
 
 def workbench() -> None:
-    centre, right = st.columns([2.1, 1], gap="large")
+    centre, right = st.container(key="wb_main").columns([2.1, 1], gap="large")
     with centre:
         # The request box sits on top of the job panel: always in reach during a run. (Pinned to the
         # page bottom instead, Streamlit keeps scrolling to the bottom and hides the top bar at 1366x768.)
         chat_box()
+        if timeline.get_job() is None:
+            examples_row()
         timeline.render(rerun_job)
     with right:
         job = timeline.get_job()
@@ -306,9 +345,19 @@ def wait_for_backend() -> None:
     st.markdown(down_banner_html(client().base_url, checks), unsafe_allow_html=True)
 
 
+def off_machine_banner_html(url: str) -> str:
+    return (f'<div class="wb-banner"><div class="h">Backend address is not on this machine: {esc(url)}</div>'
+            '<p>The Workbench only talks to a backend on 127.0.0.1, so documents never leave this computer. '
+            'Set WB_API_URL=http://127.0.0.1:8000 in .env and restart the UI.</p></div>')
+
+
 def main() -> None:
     st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state="expanded")
     theme.inject()
+    if not is_local_url(client().base_url):
+        st.markdown(header_band.band_html(), unsafe_allow_html=True)
+        st.markdown(off_machine_banner_html(client().base_url), unsafe_allow_html=True)
+        return
     health = fetch_health()
     if backend_down(health):
         st.markdown(header_band.band_html(), unsafe_allow_html=True)

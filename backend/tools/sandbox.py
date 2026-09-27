@@ -14,7 +14,7 @@ import tarfile
 import threading
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import docker
@@ -22,6 +22,7 @@ import requests
 from docker.errors import DockerException, ImageNotFound, NotFound
 
 from backend.audit import write_audit_record
+from backend.llm_client import current_task_id
 from backend.settings import settings
 from shared.contracts import ERROR_CODES
 
@@ -32,6 +33,7 @@ SANDBOX_USER = "runner"
 SANDBOX_WORKDIR = "/work"
 SANDBOX_PIDS_LIMIT = 128
 MAX_OUTPUT_CHARS = 20_000
+MAX_COLLECT_BYTES = 5_000_000     # largest result file copied back out of the container
 # Extra seconds allowed for container start/stop around the code's own timeout.
 _KILL_GRACE_S = 5
 # Docker's exit code when a process is killed with SIGKILL (OOM killer, `docker kill`).
@@ -61,6 +63,7 @@ class SandboxResult:
     oom_killed: bool = False
     tests_passed: Optional[int] = None   # only set when pytest wrote a junit xml report
     tests_failed: Optional[int] = None
+    files: dict[str, bytes] = field(default_factory=dict)   # result files asked for with collect=
 
     @property
     def ok(self) -> bool:
@@ -208,6 +211,18 @@ def _wait(container, timeout_s: int) -> tuple[Optional[int], bool]:
     return None, True
 
 
+def _read_file(container, path: str) -> Optional[bytes]:
+    """Bytes of one file from the container (relative paths are under /work); None if it is missing."""
+    full = path if path.startswith("/") else f"{SANDBOX_WORKDIR}/{path}"
+    try:
+        chunks, stat = container.get_archive(full)
+        if int(stat.get("size", 0) or 0) > MAX_COLLECT_BYTES:
+            return None
+        return read_tar_file(chunks)
+    except (NotFound, DockerException, tarfile.TarError):
+        return None
+
+
 def _read_report(container, path: str) -> Optional[tuple[int, int]]:
     full = path if path.startswith("/") else f"{SANDBOX_WORKDIR}/{path}"
     try:
@@ -228,10 +243,12 @@ def run_in_sandbox(
     command: list[str],
     *,
     timeout_s: Optional[int] = None,
+    collect: Optional[list[str]] = None,
 ) -> SandboxResult:
     """
     Copy `files` into /work of a fresh sandbox container, run `command`, and
-    return its result. Raises SandboxError(SANDBOX_UNAVAILABLE) if Docker or
+    return its result. Files named in `collect` (relative to /work) are copied
+    back out into result.files when the code wrote them. Raises SandboxError(SANDBOX_UNAVAILABLE) if Docker or
     the image is missing. A timeout does NOT raise: the result has
     timed_out=True (error code SANDBOX_TIMEOUT for the caller).
     """
@@ -270,6 +287,10 @@ def run_in_sandbox(
             counts = _read_report(container, report)
             if counts is not None:
                 result.tests_passed, result.tests_failed = counts
+        for name in collect or []:
+            data = None if timed_out else _read_file(container, name)
+            if data is not None:
+                result.files[name] = data
     except SandboxError:
         raise
     except (DockerException, requests.RequestException) as exc:
@@ -284,6 +305,7 @@ def run_in_sandbox(
     write_audit_record(
         kind="tool",
         name="sandbox",
+        task_id=current_task_id(),
         duration_ms=result.duration_ms,
         ok=result.ok,
         detail={

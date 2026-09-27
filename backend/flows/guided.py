@@ -11,6 +11,10 @@ Scenario rule (pick_scenario):
      - route "coding"                                  -> CODE_CALC
      - route "document" with a non-image file attached -> INSPECTION_NOTE
      - anything else                                   -> no scenario
+  With strict=True (agent mode: the scenario is only a safety net the user did not ask for),
+  an inferred scenario must also fit the request, see fits_request(). Without that, a question
+  about a site photo fell back to P&ID tag extraction, and a CSV analysis to the pipe-thickness
+  code flow, which cannot see attached files.
 """
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ from typing import Any, Optional, Protocol
 
 from backend.agent_tools import ToolContext, ToolOutcome, execute_tool
 from backend.file_store import file_store
+from backend.router import TABLE_SUFFIXES
 from backend.tools import findings, office
 from shared.contracts import ArtifactKind, EventType, PlanStep, RouteDecision, Scenario, TaskType
 
@@ -29,6 +34,14 @@ KB_TOP_K = 4                        # hits per KB query
 FINAL_STEPS_MAX_CHARS = 1200
 FINDING_WORDS = ("thickness", "thinning", "corrosion", "pitting", "crack", "leak", "weep", "defect",
                  "damage", "dent", "erosion", "rust")
+PID_WORDS = ("p&id", "pid", "tag", "drawing", "diagram", "instrument", "equipment")
+INSPECTION_WORDS = ("inspection", "approval", "finding", "note")
+# Words that show a free-form request asks for the scenario's file, not just an answer about it.
+DELIVERABLE_WORDS: dict[Scenario, tuple[str, ...]] = {
+    Scenario.INSPECTION_NOTE: ("approval note", "word file", "word document", "docx"),
+    Scenario.PID_TAGS: ("excel", "xlsx", "tag list", "register", "spreadsheet"),
+    Scenario.CODE_CALC: ("code", "function", "script", "program", "test"),
+}
 _FINDING_LABEL_RE = re.compile(r"^(?:\d+\.\s*)?(?:findings\s*)?(?:finding\s*\d+\s*[-:.]\s*)?", re.IGNORECASE)
 
 GUIDED_PLANS: dict[Scenario, list[tuple[str, Optional[str]]]] = {
@@ -67,10 +80,34 @@ class Runner(Protocol):
 
 
 # ------------------------------------------------------------------ scenario choice
+def fits_request(scenario: Scenario, message: str, filenames: list[str]) -> bool:
+    """Does an inferred scenario match what the user asked for (words in the request, kind of files)?"""
+    text = message.lower()
+    if scenario == Scenario.PID_TAGS:
+        return any(word in text for word in PID_WORDS)
+    if scenario == Scenario.INSPECTION_NOTE:
+        return any(word in text for word in INSPECTION_WORDS)
+    return not any(name.lower().endswith(TABLE_SUFFIXES) for name in filenames)   # CODE_CALC
+
+
+def asks_for_deliverable(scenario: Optional[Scenario], message: str) -> bool:
+    """Does a free-form request ask for this scenario's file (e.g. "... into an Excel tag list")?"""
+    text = message.lower()
+    return scenario is not None and any(word in text for word in DELIVERABLE_WORDS[scenario])
+
+
 def pick_scenario(scenario: Optional[Scenario], decision: Optional[RouteDecision],
-                  file_ids: list[str]) -> Optional[Scenario]:
+                  file_ids: list[str], message: str = "", strict: bool = False) -> Optional[Scenario]:
     if scenario is not None:
         return scenario
+    inferred = infer_scenario(decision, file_ids)
+    if inferred is None or not strict:
+        return inferred
+    names = [r.filename for r in (file_store.get_ref(f) for f in file_ids) if r is not None]
+    return inferred if fits_request(inferred, message, names) else None
+
+
+def infer_scenario(decision: Optional[RouteDecision], file_ids: list[str]) -> Optional[Scenario]:
     refs = [r for r in (file_store.get_ref(f) for f in file_ids) if r is not None]
     has_image = any(r.is_image for r in refs)
     has_document = any(not r.is_image for r in refs)

@@ -4,7 +4,9 @@ through this module (AGENTS.md rule 6): no hard-coded ports, URLs or paths in ui
 """
 from __future__ import annotations
 
+import ipaddress
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from annotated_types import MaxLen
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -43,3 +45,15 @@ def load_settings() -> UISettings:
 
 
 settings = load_settings()
+
+
+def is_local_url(url: str) -> bool:
+    """True when `url` points at this machine (localhost, 127.x.x.x, ::1). Sovereign rule: the UI
+    uploads confidential documents to WB_API_URL, so it must never be another computer."""
+    host = (urlsplit(url if "://" in url else f"http://{url}").hostname or "").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False

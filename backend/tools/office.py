@@ -62,6 +62,7 @@ MAX_CELL_CHARS = 4000            # table / Excel cells / bullets
 MAX_PARAGRAPH_CHARS = 10000      # Word body paragraphs
 PREVIEW_CHARS = 500              # Artifact.preview limit in the contract
 MAX_BULLETS_PER_SLIDE = 6
+FLOAT_DECIMALS = 6               # analysis results: hides float noise, keeps real precision
 SEVERITY_FILLS = {               # Word/Excel cell colour per contract Severity
     Severity.CRITICAL: "FF9999",
     Severity.HIGH: "FFC7CE",
@@ -589,3 +590,61 @@ def make_ppt(title: str, sections: Sequence[tuple[str, Sequence[str]]], *, task_
     prs.save(str(path))
     preview = f"{clean_title} - {len(prs.slides)} slides: " + "; ".join(headings)
     return register_artifact(path, ArtifactKind.PPTX, task_id=task_id, preview=preview)
+
+
+# ------------------------------------------------------------------ make_report (general Word document)
+@_guard
+def make_report(title: str, sections: Sequence[tuple[str, Sequence[str]]], *, task_id: str = "") -> Artifact:
+    """Plain Word report: title, date line, one heading + bullet list per section, draft footer."""
+    clean_title = _or_na(title, 200)
+    doc = Document()
+    doc.add_heading(clean_title, level=0)
+    doc.add_paragraph(f"Draft generated {today_str()}").runs[0].italic = True
+    headings: list[str] = []
+    for heading, bullets in sections:
+        heading = _or_na(heading, 200)
+        headings.append(heading)
+        doc.add_heading(heading, level=1)
+        for chunk in split_bullets(bullets):
+            for bullet in chunk:
+                doc.add_paragraph(bullet, style="List Bullet")
+    footer = doc.sections[0].footer.paragraphs[0]
+    footer.text = DRAFT_FOOTER
+    footer.runs[0].italic = True
+    slug = sanitize_filename(clean_title.replace(" ", "_"))[:40] or "report"
+    path = _artifact_file(f"{slug}_{secrets.token_hex(4)}.docx")
+    doc.save(str(path))
+    preview = f"{clean_title} - {len(headings)} sections: " + "; ".join(headings)
+    return register_artifact(path, ArtifactKind.DOCX, task_id=task_id, preview=preview)
+
+
+# ------------------------------------------------------------------ make_table_excel (analysis result)
+def cell_value(value: Any) -> Any:
+    """CSV text -> int / float when it is a plain number, so Excel can sum and sort it; else cleaned text."""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if re.fullmatch(r"-?\d+", text) and len(text) < 16:
+        return int(text)
+    if re.fullmatch(r"-?(\d+\.\d*|\.\d+|\d+)([eE][-+]?\d+)?", text):
+        return round(float(text), FLOAT_DECIMALS)      # 15.000000000000002 -> 15.0
+    return clean_text(text)
+
+
+@_guard
+def make_table_excel(header: Sequence[str], rows: Sequence[Sequence[Any]], *, input_header: Sequence[str] = (),
+                     input_rows: Sequence[Sequence[Any]] = (), task_id: str = "") -> Artifact:
+    """Result sheet (the analysis output) + Input data sheet (what the analysis read), styled like the tag list."""
+    wb = Workbook()
+    result = wb.active
+    result.title = "Result"
+    body = [[cell_value(v) for v in row] + [""] * (len(header) - len(row)) for row in rows]
+    _style_sheet(result, [str(h) for h in header] or ["(empty)"], body)
+    if input_header:
+        data = wb.create_sheet("Input data")
+        _style_sheet(data, [str(h) for h in input_header],
+                     [[cell_value(v) for v in row] + [""] * (len(input_header) - len(row)) for row in input_rows])
+    path = _artifact_file(f"analysis_{secrets.token_hex(4)}.xlsx")
+    wb.save(str(path))
+    preview = f"{len(rows)} result rows x {len(header)} columns: " + ", ".join(str(h) for h in header)
+    return register_artifact(path, ArtifactKind.XLSX, task_id=task_id, preview=preview)

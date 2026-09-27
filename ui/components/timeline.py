@@ -46,10 +46,13 @@ BubbleState = Literal["wait", "active", "open", "done", "failed"]
 TOOL_CODES = {
     "read_document": "RD", "search_knowledge": "KB", "draft_approval_note": "DN",
     "extract_pid_tags": "TG", "run_code_task": "CD", "sandbox": "SX", "finish": "RP",
+    "answer_question": "QA", "create_document": "DC", "analyze_table": "XL", "inspect_image": "IM",
 }
 TOOL_LABELS = {
     "read_document": "Read document", "search_knowledge": "Search SOPs", "draft_approval_note": "Draft note",
     "extract_pid_tags": "Extract tags", "run_code_task": "Write and test code", "finish": "Report",
+    "answer_question": "Answer from sources", "create_document": "Write Word / PPT", "analyze_table": "Analyse table",
+    "inspect_image": "Look at image",
 }
 KIND_LABELS = {
     EventType.ROUTE: "Route", EventType.PLAN: "Plan", EventType.STEP_START: "Step", EventType.LLM_CALL: "Model",
@@ -195,8 +198,8 @@ def build_stages(events: list[AgentEvent], plan: list[PlanStep], final: Optional
     plan_ev = next((e for e in events if e.type == EventType.PLAN), None)
     route_cap = "Route"
     if route is not None:
-        model = (route.data.get("decision") or {}).get("model_id")
-        route_cap = f"Route: {model}" if model else "Route"
+        task_type = (route.data.get("decision") or {}).get("task_type")
+        route_cap = f"Route: {task_type}" if task_type else "Route"
     plan_cap = f"Plan: {len(plan)} steps" if plan else "Plan"
     head = [Stage("RT", route_cap, "done" if route else "wait"),
             Stage("PL", plan_cap, "done" if plan_ev or plan else "wait")]
@@ -366,7 +369,7 @@ def live_state(job: Job) -> str:
 def header(job: Job, rerun: Optional[Callable[[Job], bool]] = None) -> None:
     label, css = STATE_STYLE["lost" if job.lost else live_state(job)]
     what = " · ".join(x for x in (job.work_order, job.mode.value.capitalize() if job.mode else None) if x)
-    left, mid, right = st.columns([5, 1.3, 1.7], vertical_alignment="center")
+    left, mid, right = st.container(key="job_head").columns([5, 1.3, 1.7], vertical_alignment="center")
     left.markdown(
         f'<div class="wb-job"><span class="id">Job {esc(job.task_id)}</span>'
         f'<span class="wb-state {css}">{label}</span><span class="wb-meta">{esc(what)}</span></div>',
@@ -404,6 +407,16 @@ def multiline(text: str) -> str:
     return "<br>".join(esc(line) for line in text.splitlines())
 
 
+def answer_markdown(text: str) -> str:
+    """
+    The model's answer as safe Markdown (bold, bullets, line breaks): raw HTML is escaped (it is
+    never rendered), "$" is escaped so amounts are not read as LaTeX, and single line breaks
+    are kept as hard breaks.
+    """
+    safe = esc(text).replace("$", "\\$")
+    return "\n".join(line + "  " if line.strip() else line for line in safe.splitlines())
+
+
 LOST_TEXT = "The backend restarted, this job was lost. Run it again."
 
 
@@ -431,9 +444,9 @@ def result_box(job: Job) -> None:
         return
     total = f"Total time {fmt_seconds(elapsed_s(job))}"
     if final.status == TaskStatus.SUCCEEDED:
-        body = multiline(final.final_answer or "The job finished without a written answer.")
-        st.markdown(f'<div class="wb-result"><div class="wb-h">Result</div><div class="wb-meta">{total}</div>'
-                    f'<div class="ans">{body}</div></div>', unsafe_allow_html=True)
+        with st.container(key="wb_result"):
+            st.markdown(f'<div class="wb-h">Result</div><div class="wb-meta">{total}</div>', unsafe_allow_html=True)
+            st.markdown(answer_markdown(final.final_answer or "The job finished without a written answer."))
     elif final.status == TaskStatus.FAILED:
         what = final.error.message if final.error else "No error details were reported."
         advice = messages.ADVICE.get(final.error.code, "") if final.error else ""
@@ -503,9 +516,9 @@ def last_job() -> Optional[JobSummary]:
 
 
 HOW_STEPS = [
-    ("Route", "The router picks the right local model for the job: document, code or drawing."),
-    ("Plan and work", "The agent reads files, searches the SOPs, writes code and tests it in the offline sandbox."),
-    ("Deliver", "You get a Word note, an Excel list or tested code to check and download."),
+    ("Route", "The router picks the right local model for the job: document, code, spreadsheet or image."),
+    ("Plan and work", "The agent reads scans and photos, searches the SOPs, writes code and tests it in the offline sandbox."),
+    ("Deliver", "You get a Word note or report, a PowerPoint deck, an Excel sheet or tested code to check and download."),
 ]
 
 
@@ -563,9 +576,9 @@ def job_panel(rerun: Optional[Callable[[Job], bool]] = None) -> None:
                    + " The job panel keeps trying every second.")
     plan = plan_of(job)
     st.markdown(process_line_html(build_stages(job.events, plan, job.final, job.done)), unsafe_allow_html=True)
-    left, right = st.columns(2, gap="medium")
+    left, right = st.container(key="job_cards").columns(2, gap="medium")
     with left:
-        router_badge.render(route_of(job))
+        router_badge.render(route_of(job), job.events)
     with right:
         plan_view.render(plan, job.events, job.final)
     result_box(job)

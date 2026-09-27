@@ -15,7 +15,7 @@ from ui.components.theme import esc
 
 REFRESH_S = 5
 TITLE = "Sovereign AI Workbench"
-TAGLINE = "Approval notes, calculation code and P&ID tag lists, drafted by local AI models."
+TAGLINE = "Approval notes, reports, decks, spreadsheets, tested code and P&ID tag lists, drafted by local AI models."
 NET_TIP = ("Core external connections since the backend started: the backend, its child processes, "
            "the Ollama model server and this UI. Details on the Network screen.")
 

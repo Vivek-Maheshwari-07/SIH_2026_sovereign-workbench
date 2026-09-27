@@ -25,7 +25,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from backend import agent, prewarm
+from backend import agent, llm_client, prewarm
 from backend.audit import read_audit_records, write_audit_record
 from backend.net_probe import run_probe
 from backend.file_store import file_store
@@ -74,6 +74,7 @@ if settings.WB_API_HOST == "0.0.0.0":
     )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+HEALTH_CHECK_TIMEOUT_S = 3.0   # each /api/health probe (Ollama, `ollama ps`) gives up after this
 
 
 def _resolve(path: Path) -> Path:
@@ -157,7 +158,7 @@ async def _handle_unexpected_exception(request: Request, exc: Exception) -> JSON
 # ---------------------------------------------------------------- health / models
 def _check_ollama() -> bool:
     try:
-        resp = httpx.get(settings.OLLAMA_HOST, timeout=3.0)
+        resp = httpx.get(settings.OLLAMA_HOST, timeout=HEALTH_CHECK_TIMEOUT_S)
         return resp.status_code < 500
     except Exception:
         return False
@@ -177,6 +178,17 @@ def _check_tesseract() -> bool:
         return proc.returncode == 0
     except Exception:
         return False
+
+
+def models_with_loaded() -> list[ModelInfo]:
+    """The registry's models, each with `loaded` = currently in Ollama's RAM (`ollama ps`)."""
+    models = registry.all_models()
+    try:
+        loaded = llm_client.loaded_models(timeout_s=HEALTH_CHECK_TIMEOUT_S)
+    except Exception:
+        return models  # Ollama down: everything stays loaded=False
+    return [m.model_copy(update={"loaded": any(llm_client.same_model(m.ollama_name, n) for n in loaded)})
+            for m in models]
 
 
 def _kb_chunks() -> int:
@@ -208,14 +220,14 @@ async def get_health() -> HealthResponse:
         sandbox_ok=sandbox_ok,
         tesseract_ok=tesseract_ok,
         kb_chunks=_kb_chunks(),
-        models=registry.all_models(),
+        models=models_with_loaded() if ollama_ok else registry.all_models(),
         time=datetime.now(timezone.utc),
     )
 
 
 @app.get(f"{API_PREFIX}/models", response_model=list[ModelInfo])
 async def get_models() -> list[ModelInfo]:
-    return registry.all_models()
+    return models_with_loaded()
 
 
 # ---------------------------------------------------------------- files

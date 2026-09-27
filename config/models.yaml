@@ -39,10 +39,14 @@ rules:
   - if_pdf_without_text_layer: true
     task_type: document
     reason: "Scanned PDF -> OCR + document agent"
+  - if_table_attached: true
+    task_type: coding
+    reason: "Spreadsheet attached -> code specialist writes the analysis (pandas, sandbox)"
   - if_keywords_any: ["code", "python", "script", "function", "bug", "unit test", "program"]
     task_type: coding
     reason: "Coding keywords -> code specialist model"
-  - if_keywords_any: ["approval note", "summarize", "summary", "report", "sop", "manual", "letter"]
+  - if_keywords_any: ["approval note", "summarize", "summarise", "summary", "report", "sop", "manual", "letter",
+                      "presentation", "powerpoint", "slides", "deck", "word document"]
     task_type: document
     reason: "Document keywords -> document agent"
 
@@ -63,10 +67,13 @@ examples:
     - "Draft an approval note for the repair"
     - "What does our SOP say about hot work permits"
     - "Extract the key findings from this letter"
+    - "Make a short PowerPoint deck for the shift briefing"
+    - "Prepare a Word report on the safety requirements"
   vision:
     - "What equipment is shown in this drawing"
     - "Read the handwritten notes in this photo"
     - "List all tags in this P&ID"
+    - "Is there corrosion or a leak visible in this photo?"
   general:
     - "Explain what a pressure relief valve does"
     - "Give me a checklist for a shutdown meeting"

@@ -86,6 +86,7 @@ h1.wb-title, .wb-title {{ font-family: var(--din) !important; font-size: 26px !i
 .wb-lamp i {{ width: 10px; height: 10px; border-radius: 50%; flex: none; display: inline-block; position: relative; top: 1px; }}
 .wb-lamp .why {{ color: var(--muted); font-size: 13px; }}
 .wb-lamp .fix {{ display: block; color: var(--alarm-text); font-size: 13px; font-weight: 600; }}
+.wb-lamp .role {{ display: block; color: var(--ink-2); font-size: 13px; }}
 .c-ok {{ color: var(--done-text); }} .c-alarm {{ color: var(--alarm-text); }} .c-warn {{ color: var(--warn-text); }}
 .c-active {{ color: var(--active-text); }} .c-dim {{ color: var(--muted); }}
 .b-ok {{ background: var(--done); }} .b-alarm {{ background: var(--alarm); }} .b-off {{ background: var(--pipe); }}
@@ -170,6 +171,11 @@ h1.wb-title, .wb-title {{ font-family: var(--din) !important; font-size: 26px !i
   border-radius: 0 8px 8px 0; padding: 10px 14px; margin-top: 10px; box-shadow: var(--shadow); }}
 .wb-result.failed {{ border-left-color: var(--alarm); }} .wb-result.cancelled {{ border-left-color: var(--pipe); }}
 .wb-result .ans {{ font-size: 15px; margin: 4px 0 0 0; color: var(--ink); line-height: 1.45; }}
+.st-key-wb_result {{ background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--done);
+  border-radius: 0 8px 8px 0; padding: 10px 14px; margin-top: 10px; box-shadow: var(--shadow); gap: 2px; }}
+.st-key-wb_result p, .st-key-wb_result li {{ font-size: 15px; line-height: 1.45; color: var(--ink); }}
+/* Streamlit pulls markdown blocks up by -1rem; inside this box that put the answer over "Total time" */
+.st-key-wb_result [data-testid="stMarkdownContainer"] {{ margin-bottom: 0 !important; }}
 
 /* idle screen: how a job runs + last job */
 .wb-how {{ display: flex; flex-wrap: wrap; gap: 0; margin: 6px 0 4px 0; }}
@@ -243,6 +249,19 @@ h1.wb-title, .wb-title {{ font-family: var(--din) !important; font-size: 26px !i
 [class*="st-key-dl_"] button p {{ font-weight: 700; }}
 [class*="st-key-dl_"] button:hover {{ filter: brightness(1.06); }}
 .wb-footer {{ margin-top: 14px; color: var(--muted); font-size: 13px; }}
+
+/* narrow screens (laptop with a docked window, tablet): stack the workbench and the deliverables
+   tray, and let the job header wrap instead of squeezing the clock and the button */
+.wb-clock {{ white-space: nowrap; }}
+@media (max-width: 1200px) {{
+  .st-key-wb_main > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"] {{ flex-wrap: wrap; }}
+  .st-key-wb_main > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {{
+    min-width: 100%; }}
+  .st-key-job_head [data-testid="stHorizontalBlock"] {{ flex-wrap: wrap; }}
+  .st-key-job_cards [data-testid="stHorizontalBlock"] {{ flex-wrap: wrap; }}
+  .st-key-job_cards [data-testid="stColumn"] {{ min-width: 280px; }}
+  .st-key-job_head [data-testid="stColumn"] {{ min-width: 130px; }}
+}}
 </style>
 """
 

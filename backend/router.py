@@ -32,19 +32,30 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
-def _inspect_attachments(file_ids: list[str]) -> tuple[bool, bool]:
-    """Returns (has_image, has_scanned_pdf) for the given file_ids, via file_store."""
-    has_image = False
-    has_scanned_pdf = False
+TABLE_SUFFIXES = (".csv", ".xlsx")   # spreadsheets: analysed by code the coder model writes
+
+
+@dataclass
+class Attachments:
+    has_image: bool = False
+    has_scanned_pdf: bool = False
+    has_table: bool = False            # CSV / Excel: analysed by code the coder model writes
+
+
+def _inspect_attachments(file_ids: list[str]) -> Attachments:
+    """What kinds of files are attached, via file_store."""
+    found = Attachments()
     for file_id in file_ids:
         ref = file_store.get_ref(file_id)
         if ref is None:
             continue
         if ref.is_image:
-            has_image = True
+            found.has_image = True
         elif ref.has_text_layer is False:
-            has_scanned_pdf = True
-    return has_image, has_scanned_pdf
+            found.has_scanned_pdf = True
+        elif ref.filename.lower().endswith(TABLE_SUFFIXES):
+            found.has_table = True
+    return found
 
 
 def _decision_for(task_type: TaskType, reason: str, layer: str, confidence: float) -> RouteDecision:
@@ -60,17 +71,20 @@ def _decision_for(task_type: TaskType, reason: str, layer: str, confidence: floa
 
 
 def _rule_layer(request: RouteRequest) -> Optional[RouteDecision]:
-    has_image, has_scanned_pdf = _inspect_attachments(request.file_ids)
+    attached = _inspect_attachments(request.file_ids)
     message_lower = request.message.lower()
 
     for rule in registry.rules():
         task_type = TaskType(rule["task_type"])
         rule_reason = rule.get("reason", f"rule matched for {task_type.value}")
 
-        if rule.get("if_image_attached") and has_image:
+        if rule.get("if_image_attached") and attached.has_image:
             return _decision_for(task_type, f"Rule: {rule_reason}", "rule", 1.0)
 
-        if rule.get("if_pdf_without_text_layer") and has_scanned_pdf:
+        if rule.get("if_pdf_without_text_layer") and attached.has_scanned_pdf:
+            return _decision_for(task_type, f"Rule: {rule_reason}", "rule", 1.0)
+
+        if rule.get("if_table_attached") and attached.has_table:
             return _decision_for(task_type, f"Rule: {rule_reason}", "rule", 1.0)
 
         keywords = rule.get("if_keywords_any")

@@ -91,20 +91,30 @@ def records_html(records: list[AuditRecord]) -> str:
     return f'<table class="wb-conn wb-audit">{head}{"".join(rows)}</table>'
 
 
+def effective_task_id(typed: str, current_task: str | None, this_job: bool) -> str | None:
+    """A typed task id wins; else the current job when "Only this job" is on; else all tasks (None)."""
+    if typed.strip():
+        return typed.strip()
+    return current_task if (this_job and current_task) else None
+
+
 def render(current_task: str | None = None) -> None:
     st.markdown('<div class="wb-h">Audit log</div>', unsafe_allow_html=True)
     st.caption("Everything the backend recorded: model calls (all to 127.0.0.1), tool runs, network events "
                "and system events. Red rows are core leaks, amber rows are platform connections.")
     c1, c2, c3, c4 = st.columns([2.2, 1.2, 1, 1.2], vertical_alignment="bottom")
-    task_id = c1.text_input("Task id", key="audit_task", placeholder=current_task or "t_... (empty = all tasks)")
+    typed = c1.text_input("Task id", key="audit_task", placeholder="t_... (empty = all tasks)")
     kind = c2.selectbox("Kind", KINDS, key="audit_kind")
     limit = c3.selectbox("Limit", LIMITS, index=3, key="audit_limit")
     c4.button("Refresh", key="audit_refresh", width="stretch")
-    t1, t2 = st.columns(2)
+    t0, t1, t2 = st.columns(3)
+    this_job = bool(current_task) and t0.toggle(f"Only this job ({current_task})", value=True, key="audit_this_job",
+                                                disabled=bool(typed.strip()))
     hide = t1.toggle("Hide other apps' connections", value=True, key="audit_hide_other")
     failures = t2.toggle("Only records that failed", value=False, key="audit_failures")
 
-    result = api_client.get_client().audit(task_id=task_id.strip() or None, limit=int(limit))
+    task_id = effective_task_id(typed, current_task, this_job)
+    result = api_client.get_client().audit(task_id=task_id, limit=int(limit))
     if result.data is None:
         messages.show("The audit log could not be loaded", result.error, result.failure)
         return

@@ -1,0 +1,9 @@
+tag,service,design_pressure_bar,operating_pressure_bar,nominal_thickness_mm,last_thickness_mm,years_in_service
+V-101,Crude flash drum,12.0,9.5,12.0,10.3,14
+V-102,Naphtha stabiliser receiver,18.0,15.2,16.0,13.1,11
+E-201,Crude preheat exchanger shell,25.0,21.0,8.0,6.6,9
+T-201,Crude storage tank bottom plate,1.0,0.2,8.0,6.0,22
+T-301,Slop tank shell course 1,1.5,0.4,6.0,5.2,18
+V-103,Fuel gas knock-out drum,10.0,8.1,10.0,9.4,7
+P-201A,Charge pump casing,30.0,24.0,14.0,13.6,6
+6-P-101,Crude line CML-03 elbow,20.0,16.5,7.11,5.2,12

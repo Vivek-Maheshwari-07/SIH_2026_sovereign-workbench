@@ -11,28 +11,38 @@ emits an artifact event (keys as in shared.contracts).
 """
 from __future__ import annotations
 
+import ast
+import csv
+import io
 import json
 import re
 import secrets
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Optional
+
+from pydantic import BaseModel, Field
 
 from backend import llm_client
 from backend.audit import write_audit_record
 from backend.file_store import file_store
 from backend.flows import code_flow
 from backend.registry import registry
+from backend.router import TABLE_SUFFIXES
 from backend.settings import settings
 from backend.tools import findings, knowledge, office
 from backend.tools.documents import (
     PID_FAST_METHODS,
     PID_PROMPT_EXAMPLES,
     PID_TILE_NAMES,
+    DocumentExtractionError,
     PageResult,
     extract,
     pid_path_note,
+    vision_png,
 )
+from backend.tools.sandbox import SandboxError, run_in_sandbox
 from shared.contracts import (
     ApprovalNote,
     Artifact,
@@ -55,6 +65,15 @@ MIN_KB_SCORE = 0.57                 # hits below this are never shown or cited (
 DOC_PROMPT_MAX_CHARS = 14000        # document text given to draft_approval_note (fits WB_NUM_CTX 8192)
 MAX_TOP_K = 10
 MAX_FILLED_SOP_REFS = 3             # retrieved passages cited when the model cites none
+ANSWER_TOP_K = 4                    # KB hits searched by answer_question / create_document
+ANSWER_MAX_PASSAGES = 3             # SOP passages given to them (each ~600 tokens of prompt on CPU)
+ANSWER_SOURCE_CHARS = 2500          # per SOP passage
+ANSWER_DOC_CHARS = 9000             # attached-document text, shared between the documents
+ANSWER_TIMEOUT_S = 300              # these calls have long prompts; still capped by the task deadline
+TABLE_INPUT, TABLE_OUTPUT, TABLE_SCRIPT = "input.csv", "output.csv", "analysis.py"
+TABLE_MAX_ROWS = 20000              # rows read from a CSV/Excel file by analyze_table
+TABLE_PREVIEW_ROWS = 5              # rows shown to the coder model
+TABLE_ERROR_CHARS = 1200            # tail of a failed run fed back to the coder model
 MAX_KB_QUERIES = findings.MAX_KB_QUERIES   # search_knowledge with `queries`: most searches per call
 # The approval note must come out the same every run (severities were High in some runs and Medium
 # in others at WB_TEMPERATURE 0.2). Greedy decoding + a fixed seed, for draft_approval_note only.
@@ -142,6 +161,7 @@ class Scratchpad:
     notes: dict[str, ApprovalNote] = field(default_factory=dict)
     tag_lists: dict[str, PidTagList] = field(default_factory=dict)
     code_results: dict[str, CodeResult] = field(default_factory=dict)
+    answers: dict[str, str] = field(default_factory=dict)      # ans_1: answer_question / inspect_image text
     _counters: dict[str, int] = field(default_factory=dict)
 
     def new_id(self, prefix: str) -> str:
@@ -498,8 +518,22 @@ def merge_pid_tags(ctx: ToolContext, pages: list[PageResult]) -> PidTagList:
     return PidTagList(tags=tags, notes=pid_path_note(pages))
 
 
+def ensure_pid_read(ctx: ToolContext, doc: DocEntry) -> DocEntry:
+    """
+    A drawing read with kind="auto" is one whole-page OCR pass, which misses most small tags.
+    Small models often forget kind="pid", so an image is re-read here in P&ID tile mode.
+    """
+    ref = file_store.get_ref(doc.file_id)
+    if doc.kind == "pid" or ref is None or not ref.is_image:
+        return doc
+    doc.pages, doc.kind = extract(doc.file_id, kind="pid").pages, "pid"
+    ctx.event(EventType.LOG, "Re-read as P&ID", {"level": "info", "text": (
+        f"{doc.filename} was read as a plain image; re-read it in P&ID tile mode for the tag list.")})
+    return doc
+
+
 def extract_pid_tags(ctx: ToolContext, doc_id: str) -> ToolOutcome:
-    doc = _doc(ctx, doc_id)
+    doc = ensure_pid_read(ctx, _doc(ctx, doc_id))
     if any(p.method in PID_FAST_METHODS for p in doc.pages):
         return _save_tag_list(ctx, merge_pid_tags(ctx, doc.pages))
     blocks = []
@@ -548,8 +582,297 @@ def run_code_task(ctx: ToolContext, request: str) -> ToolOutcome:
         f"Printed calculation steps:\n{trim(result.stdout_tail, 800)}\n{NEXT_FINISH}"))
 
 
+def final_answer(ctx: ToolContext, text: str) -> str:
+    """
+    The answer the user sees. Small models retell a grounded answer in their own words and drop its
+    [n] citations; an uncited retelling must not replace the checked one. Without citations:
+    if the task produced files, keep the model's text (it names them) and add the Sources list;
+    otherwise show the grounded answer itself.
+    """
+    text = humanize_ids(ctx, text)
+    if not ctx.scratchpad.answers or _CITATION_RE.search(text):
+        return text
+    grounded = list(ctx.scratchpad.answers.values())[-1]
+    _, marker, sources = grounded.partition("\n\nSources")
+    if not marker:
+        return text            # an image answer has no citations to lose; keep the model's wording
+    return f"{text}\n\nSources{sources}" if ctx.artifacts else grounded
+
+
 def finish(ctx: ToolContext, answer: str) -> ToolOutcome:
-    return ToolOutcome(ok=True, summary="Finished.", finish_answer=answer.strip())
+    return ToolOutcome(ok=True, summary="Finished.", finish_answer=final_answer(ctx, answer.strip()))
+
+
+# ------------------------------------------------------------------ general tools (evaluation pass)
+# Grounded Q&A, Word/PowerPoint documents, spreadsheet analysis and photo inspection, so the agent
+# is not limited to the three demo scenarios.
+_ANSWER_SYSTEM = """You answer a plant engineer's question using ONLY the numbered sources below.
+Rules:
+- Write a clear answer in plain words: short paragraphs or bullet points, with the actual facts,
+  numbers and limits the sources give.
+- After each fact, cite its source number in square brackets, e.g. [1] or [2].
+- If the sources do not answer the question, say so plainly; never guess or use outside knowledge.
+- Keep it short: at most 180 words. Do not mention these rules."""
+
+_OUTLINE_SYSTEM = """You write the content of a {kind} for plant engineers, as JSON.
+Use the material below; keep facts, numbers and limits exactly as written there. If the material
+does not cover a point the request asks for, leave it out rather than invent it.
+Each section has a short heading and 2-6 bullets; each bullet is one short, complete sentence.
+Write 3-6 sections. Do not add a sources section; the system adds it."""
+
+_TABLE_SYSTEM = """You write ONE Python 3 script, analysis.py, for a plant engineer.
+It runs offline in a sandbox that has only pandas and numpy.
+Rules:
+- Read the data with: df = pd.read_csv("input.csv")
+- Do exactly what the request asks, using the column names exactly as listed.
+- Write the result table with: result.to_csv("output.csv", index=False)
+- Round computed percentages and ratios with round(x, 2) BEFORE comparing them with a threshold.
+- Sort the result table by the main computed column, largest first.
+- Print a short plain-text summary of the key numbers (at most 15 lines).
+- No plots, no internet, no other files, no input().
+Reply with the full script in one fenced python code block and nothing else."""
+
+_IMAGE_PROMPT = """You are helping a refinery engineer. Look at this image and answer:
+{question}
+Describe only what you can actually see (equipment, condition, damage, readings, handwriting).
+If something is unclear or not visible, say so. Answer in at most 8 short bullet points."""
+
+_CODE_BLOCK_RE = re.compile(r"```(?:python|py)?[^\n]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_CITATION_RE = re.compile(r"\[(\d{1,2})\]")
+_ID_RE = re.compile(r"\b(kb|doc|ans)_(\d+)\b")
+DOC_FORMATS = {"docx": "docx", "word": "docx", "doc": "docx", "report": "docx",
+               "pptx": "pptx", "ppt": "pptx", "powerpoint": "pptx", "slides": "pptx", "presentation": "pptx"}
+
+
+class _Section(BaseModel):
+    heading: str
+    bullets: list[str] = Field(min_length=1, max_length=8)
+
+
+class _Outline(BaseModel):
+    """LLM output schema for create_document (internal)."""
+    sections: list[_Section] = Field(min_length=1, max_length=8)
+
+
+def _llm_text(ctx: ToolContext, messages: list[dict[str, Any]], purpose: str, *, task_type: TaskType = TaskType.DOCUMENT,
+              images: Optional[list[bytes]] = None, timeout_s: Optional[float] = None) -> str:
+    model = registry.model_for_task(task_type)
+    start = time.monotonic()
+    reply = llm_client.chat(model.ollama_name, messages, images=images, purpose=purpose, timeout_s=timeout_s)
+    ctx.event(EventType.LLM_CALL, f"{model.id}: {purpose}", {
+        "model_id": model.id, "purpose": purpose, "duration_ms": int((time.monotonic() - start) * 1000),
+        "tokens_out": reply.tokens_out,
+    })
+    return reply.text.strip()
+
+
+def hit_label(hit: KBHit) -> str:
+    return f"{hit.source}, p.{hit.page}" if hit.page else hit.source
+
+
+def relevant_hits(ctx: ToolContext, query: str, limit: int = ANSWER_MAX_PASSAGES) -> list[KBHit]:
+    """Best passages for `query`: a fresh KB search plus earlier hits of this task, >= MIN_KB_SCORE, no duplicates."""
+    found = [h for h in knowledge.search(query, ANSWER_TOP_K) if h.score >= MIN_KB_SCORE]
+    merged: dict[tuple[str, Optional[int], str], KBHit] = {}
+    for hit in found + list(ctx.scratchpad.kb_hits.values()):
+        key = (hit.source, hit.page, hit.text)
+        if key not in merged or hit.score > merged[key].score:
+            merged[key] = hit
+    return sorted(merged.values(), key=lambda h: h.score, reverse=True)[:limit]
+
+
+def _chosen_docs(ctx: ToolContext, doc_ids: Optional[list[str]]) -> list[DocEntry]:
+    return [_doc(ctx, d) for d in doc_ids] if doc_ids else list(ctx.scratchpad.docs.values())
+
+
+def numbered_sources(docs: list[DocEntry], hits: list[KBHit]) -> list[tuple[str, str]]:
+    """(label, text) per source, in the order they are numbered for the model; document text is shared out."""
+    sources = [(d.filename, d.full_text()[:max(1000, ANSWER_DOC_CHARS // len(docs))]) for d in docs]
+    sources += [(hit_label(h), h.text[:ANSWER_SOURCE_CHARS]) for h in hits]
+    return sources
+
+
+def cite_sources(answer: str, labels: list[str]) -> str:
+    """Append the list of sources the answer cites as [n]; if it cites none, list every source it was given."""
+    cited = sorted({int(n) for n in _CITATION_RE.findall(answer) if 1 <= int(n) <= len(labels)})
+    if cited:
+        return f"{answer}\n\nSources:\n" + "\n".join(f"[{n}] {labels[n - 1]}" for n in cited)
+    if labels:
+        return f"{answer}\n\nSources consulted: " + "; ".join(labels)
+    return answer
+
+
+def humanize_ids(ctx: ToolContext, text: str) -> str:
+    """Replace our internal ids in the final answer: kb_2 -> 'file.pdf, p.3', doc_1 -> file name, ans_1 -> the answer."""
+    def swap(match: re.Match) -> str:
+        key, prefix = match.group(0), match.group(1)
+        if prefix == "kb" and key in ctx.scratchpad.kb_hits:
+            return hit_label(ctx.scratchpad.kb_hits[key])
+        if prefix == "doc" and key in ctx.scratchpad.docs:
+            return ctx.scratchpad.docs[key].filename
+        if prefix == "ans" and key in ctx.scratchpad.answers:
+            return ctx.scratchpad.answers[key]
+        return key
+    return _ID_RE.sub(swap, text)
+
+
+def answer_question(ctx: ToolContext, question: str, doc_ids: Optional[list[str]] = None,
+                    use_knowledge: bool = True) -> ToolOutcome:
+    docs = _chosen_docs(ctx, doc_ids)
+    hits = relevant_hits(ctx, question) if use_knowledge else []
+    if not docs and not hits:
+        return ToolOutcome(ok=True, summary=(
+            f"No attached document and no SOP passage is relevant to this question (minimum score "
+            f"{MIN_KB_SCORE:.2f}). Tell the user the offline knowledge base does not cover it."))
+    sources = numbered_sources(docs, hits)
+    listing = "\n\n".join(f"[{i}] {label}\n{text}" for i, (label, text) in enumerate(sources, start=1))
+    messages = [{"role": "system", "content": _ANSWER_SYSTEM},
+                {"role": "user", "content": f"Sources:\n\n{listing}\n\nQuestion: {question}"}]
+    answer = cite_sources(_llm_text(ctx, messages, "answer_question", timeout_s=ANSWER_TIMEOUT_S),
+                          [label for label, _ in sources])
+    ans_id = ctx.scratchpad.new_id("ans")
+    ctx.scratchpad.answers[ans_id] = answer
+    return ToolOutcome(ok=True, summary=(
+        f"{ans_id}:\n{trim(answer, 1100)}\nNext step: call finish with answer {ans_id!r} (or this text with its "
+        "[n] citations and Sources list), or create_document if the user asked for a Word or PowerPoint file."))
+
+
+def create_document(ctx: ToolContext, format: str, title: str, instructions: str = "",
+                    doc_ids: Optional[list[str]] = None) -> ToolOutcome:
+    kind = DOC_FORMATS.get(format.strip().lower())
+    if kind is None:
+        raise ToolError(f"format must be 'docx' (Word) or 'pptx' (PowerPoint), not {format!r}")
+    docs = _chosen_docs(ctx, doc_ids)
+    hits = relevant_hits(ctx, f"{title}. {instructions}".strip())
+    material = [f"Answer already written:\n{a}" for a in ctx.scratchpad.answers.values()]
+    material += [f"From {label}:\n{text}" for label, text in numbered_sources(docs, hits)]
+    if not material:
+        material = ["(No plant document covers this. Write general engineering guidance and say so in the first bullet.)"]
+    name = "PowerPoint deck" if kind == "pptx" else "Word report"
+    messages = [{"role": "system", "content": _OUTLINE_SYSTEM.format(kind=name)},
+                {"role": "user", "content": f"Title: {title}\nRequest: {instructions or ctx.task_message}\n\n"
+                                            + "\n\n".join(material)[:DOC_PROMPT_MAX_CHARS]}]
+    outline: _Outline = _llm_json(ctx, _Outline, messages, "create_document", timeout_s=ANSWER_TIMEOUT_S)
+    sections = [(s.heading, s.bullets) for s in outline.sections]
+    labels = list(dict.fromkeys([d.filename for d in docs] + [hit_label(h) for h in hits]))
+    if labels:
+        sections.append(("Sources", labels))
+    maker = office.make_ppt if kind == "pptx" else office.make_report
+    artifact = maker(title, sections, task_id=ctx.task_id)
+    ctx.artifact(artifact)
+    return ToolOutcome(ok=True, summary=f"{name} saved as {artifact.filename}: {artifact.preview}. {NEXT_FINISH}")
+
+
+def extract_python(text: str) -> str:
+    """The first fenced python block of a reply (or the whole reply when it has no fence)."""
+    match = _CODE_BLOCK_RE.search(text)
+    return (match.group(1) if match else text).strip()
+
+
+def check_table_script(code: str) -> list[str]:
+    """Problems that make running the script pointless; an empty list means run it."""
+    try:
+        ast.parse(code)
+    except SyntaxError as exc:
+        return [f"syntax error on line {exc.lineno}: {exc.msg}"]
+    problems = []
+    if TABLE_INPUT not in code:
+        problems.append(f'the script must read "{TABLE_INPUT}"')
+    if TABLE_OUTPUT not in code:
+        problems.append(f'the script must write the result table to "{TABLE_OUTPUT}"')
+    return problems
+
+
+def load_table(path: Path):
+    """A CSV or the first sheet of an Excel file as a pandas DataFrame (at most TABLE_MAX_ROWS rows)."""
+    import pandas as pd
+
+    if path.suffix.lower() == ".csv":
+        return pd.read_csv(path, nrows=TABLE_MAX_ROWS)
+    return pd.read_excel(path, sheet_name=0, nrows=TABLE_MAX_ROWS, engine="openpyxl")
+
+
+def describe_table(df) -> str:
+    columns = "\n".join(f"- {name} ({dtype})" for name, dtype in df.dtypes.astype(str).items())
+    return (f"{TABLE_INPUT} has {len(df)} rows. Columns and types:\n{columns}\n\n"
+            f"First rows:\n{df.head(TABLE_PREVIEW_ROWS).to_csv(index=False)}")
+
+
+def csv_rows(data: bytes) -> tuple[list[str], list[list[str]]]:
+    rows = list(csv.reader(io.StringIO(data.decode("utf-8", errors="replace"))))
+    return (rows[0], rows[1:]) if rows else ([], [])
+
+
+def _failure_text(run) -> str:
+    if run.timed_out:
+        return f"the script ran longer than {settings.WB_SANDBOX_TIMEOUT_S} s"
+    tail = (run.stderr or run.stdout).strip()[-TABLE_ERROR_CHARS:]
+    return tail or f"the script finished but wrote no {TABLE_OUTPUT}"
+
+
+def analyze_table(ctx: ToolContext, file_id: str, request: str) -> ToolOutcome:
+    ref, path = file_store.get_ref(file_id), file_store.get_path(file_id)
+    if ref is None or path is None:
+        raise ToolError(f"unknown file_id {file_id!r}; use one of the file_ids listed in the task")
+    if path.suffix.lower() not in TABLE_SUFFIXES:
+        raise ToolError(f"analyze_table needs a CSV or Excel file, not {ref.filename}")
+    df = load_table(path)
+    input_csv = df.to_csv(index=False)
+    coder = registry.model_for_task(TaskType.CODING)
+    messages = [{"role": "system", "content": _TABLE_SYSTEM},
+                {"role": "user", "content": f"Request: {request}\n\n{describe_table(df)}"}]
+    last_error = "no attempt made"
+    for attempt in range(1, settings.WB_CODE_MAX_ATTEMPTS + 1):
+        code = extract_python(_llm_text(ctx, messages, "analyze_table", task_type=TaskType.CODING,
+                                        timeout_s=ANSWER_TIMEOUT_S))
+        problems = check_table_script(code)
+        if not problems:
+            run = run_in_sandbox({TABLE_INPUT: input_csv, TABLE_SCRIPT: code}, ["python", TABLE_SCRIPT],
+                                 collect=[TABLE_OUTPUT])
+            if run.ok and TABLE_OUTPUT in run.files:
+                ctx.event(EventType.LOG, f"Attempt {attempt}: ran in sandbox", {"level": "info", "text": (
+                    f"Attempt {attempt}: {TABLE_SCRIPT} ran in the offline sandbox in {run.duration_ms / 1000:.1f} s.")})
+                return _save_table_result(ctx, code, run.files[TABLE_OUTPUT], run.stdout, df, attempt)
+            problems = [_failure_text(run)]
+        last_error = "; ".join(problems)
+        ctx.warn(f"Attempt {attempt} ({coder.id}): analysis script rejected - {_one_line(last_error, 200)}")
+        messages += [{"role": "assistant", "content": f"```python\n{code}\n```"},
+                     {"role": "user", "content": f"The script failed: {last_error}\n"
+                                                 "Fix it and reply with the full corrected script in one python block."}]
+    raise ToolError(f"no working analysis after {settings.WB_CODE_MAX_ATTEMPTS} attempts; last error: "
+                    f"{_one_line(last_error, 300)}", code="BAD_MODEL_OUTPUT")
+
+
+def _save_table_result(ctx: ToolContext, code: str, output: bytes, stdout: str, df, attempts: int) -> ToolOutcome:
+    header, rows = csv_rows(output)
+    workbook = office.make_table_excel(header, rows, input_header=[str(c) for c in df.columns],
+                                       input_rows=df.astype(str).values.tolist(), task_id=ctx.task_id)
+    ctx.artifact(workbook)
+    script_name = workbook.filename.replace(".xlsx", ".py")
+    ctx.artifact(office.save_text_artifact(script_name, code, ArtifactKind.PY, task_id=ctx.task_id))
+    return ToolOutcome(ok=True, summary=(
+        f"Analysis ran in the sandbox ({attempts} attempt(s)); result {len(rows)} rows x {len(header)} columns "
+        f"({', '.join(header[:12])}), saved as {workbook.filename} with the script {script_name}.\n"
+        f"Printed summary:\n{trim(stdout, 700)}\n{NEXT_FINISH}"))
+
+
+def inspect_image(ctx: ToolContext, file_id: str, question: str) -> ToolOutcome:
+    ref, path = file_store.get_ref(file_id), file_store.get_path(file_id)
+    if ref is None or path is None:
+        raise ToolError(f"unknown file_id {file_id!r}; use one of the file_ids listed in the task")
+    if not (ref.is_image or path.suffix.lower() == ".pdf"):
+        raise ToolError(f"inspect_image needs an image or a PDF, not {ref.filename}; use read_document")
+    answer = _llm_text(ctx, [{"role": "user", "content": _IMAGE_PROMPT.format(question=question)}], "inspect_image",
+                       task_type=TaskType.VISION, images=[vision_png(path)], timeout_s=ANSWER_TIMEOUT_S)
+    if not answer:
+        return ToolOutcome(ok=False, summary="The vision model returned nothing for this image.",
+                           error_code="BAD_MODEL_OUTPUT")
+    answer = f"{answer}\n\n(Seen in {ref.filename} by the local vision model; check against the original.)"
+    ans_id = ctx.scratchpad.new_id("ans")
+    ctx.scratchpad.answers[ans_id] = answer
+    return ToolOutcome(ok=True, summary=(
+        f"{ans_id}:\n{trim(answer, 1100)}\nNext step: call finish with answer {ans_id!r}, or create_document "
+        "if the user asked for a Word or PowerPoint file."))
 
 
 # ------------------------------------------------------------------ registry
@@ -604,6 +927,40 @@ TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in [
              "return the test result and printed steps.",
              _schema({"request": {"type": "string", "description": "the full coding request"}}, ["request"]),
              run_code_task),
+    ToolSpec("answer_question",
+             "Answer a question from the SOP knowledge base and/or documents read with read_document. "
+             "Reads the full passages and returns an answer with [n] citations and a Sources list.",
+             _schema({"question": {"type": "string", "description": "the user's question, in full"},
+                      "doc_ids": {"type": "array", "items": {"type": "string"},
+                                  "description": "optional doc ids from read_document (default: all read so far)"},
+                      "use_knowledge": {"type": "boolean", "description": "search the SOPs too (default true)"}},
+                     ["question"]),
+             answer_question),
+    ToolSpec("create_document",
+             "Write a Word report (format 'docx') or a PowerPoint deck (format 'pptx') from what this task has "
+             "found so far (answers, documents, SOP passages) and save it as a file.",
+             _schema({"format": {"type": "string", "description": "'docx' for a Word report, 'pptx' for a PowerPoint deck"},
+                      "title": {"type": "string", "description": "document title"},
+                      "instructions": {"type": "string", "description": "what the document must cover"},
+                      "doc_ids": {"type": "array", "items": {"type": "string"},
+                                  "description": "optional doc ids to use (default: all read so far)"}},
+                     ["format", "title"]),
+             create_document),
+    ToolSpec("analyze_table",
+             "Analyse an attached CSV or Excel file: the code model writes pandas code, it runs in the offline "
+             "sandbox, and the result is saved as an Excel file plus the script.",
+             _schema({"file_id": {"type": "string", "description": "file_id of the CSV/XLSX from the task"},
+                      "request": {"type": "string", "description": "what to calculate, in full"}},
+                     ["file_id", "request"]),
+             analyze_table),
+    ToolSpec("inspect_image",
+             "Look at an attached photo, sketch or handwritten note with the vision model and answer a question "
+             "about what it shows (condition, damage, readings, handwriting). Not for P&ID tag lists: for those "
+             "use read_document with kind 'pid', then extract_pid_tags.",
+             _schema({"file_id": {"type": "string", "description": "file_id of the image from the task"},
+                      "question": {"type": "string", "description": "what to look for or answer"}},
+                     ["file_id", "question"]),
+             inspect_image),
     ToolSpec("finish",
              "Give the final answer to the user and stop. Mention any files produced.",
              _schema({"answer": {"type": "string", "description": "the final answer"}}, ["answer"]),
@@ -616,7 +973,7 @@ def tool_definitions() -> list[dict[str, Any]]:
 
 
 # ------------------------------------------------------------------ argument checking and execution
-_JSON_TYPES = {"string": str, "integer": int, "array": list}
+_JSON_TYPES = {"string": str, "integer": int, "array": list, "boolean": bool}
 
 
 def validate_args(spec: ToolSpec, args: Any) -> dict[str, Any]:
@@ -655,7 +1012,7 @@ def execute_tool(ctx: ToolContext, name: str, args: Any) -> ToolOutcome:
         outcome = spec.fn(ctx, **validate_args(spec, args))
     except ToolError as exc:
         outcome = ToolOutcome(ok=False, summary=f"Error: {exc}", error_code=exc.code)
-    except (llm_client.LLMError, office.OfficeError) as exc:
+    except (llm_client.LLMError, office.OfficeError, DocumentExtractionError, SandboxError) as exc:
         outcome = ToolOutcome(ok=False, summary=f"Error ({exc.code}): {exc}", error_code=exc.code)
         ctx.event(EventType.ERROR, f"{name} failed", {"error": ErrorInfo(code=exc.code, message=str(exc),
                                                                           retryable=True).model_dump()})

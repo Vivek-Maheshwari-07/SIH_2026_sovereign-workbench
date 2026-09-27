@@ -20,6 +20,8 @@ from ui.components.theme import esc, human_size
 CACHE_KEY = "artifact_cache"
 XLSX_ROWS = 50
 DOCX_PARAGRAPHS = 8
+PPTX_SLIDES = 12
+PPTX_BULLETS = 3
 TEXT_PREVIEW_CHARS = 4000
 
 
@@ -41,6 +43,19 @@ def docx_paragraphs(content: bytes, limit: int = DOCX_PARAGRAPHS) -> list[str]:
     return paras[:limit]
 
 
+def pptx_outline(content: bytes, slides: int = PPTX_SLIDES, bullets: int = PPTX_BULLETS) -> list[tuple[str, list[str]]]:
+    """(slide title, first bullets) per slide; the draft footer text box is left out."""
+    from pptx import Presentation  # python-pptx, in the lock file
+
+    outline = []
+    for slide in list(Presentation(io.BytesIO(content)).slides)[:slides]:
+        title = slide.shapes.title.text.strip() if slide.shapes.title is not None else ""
+        body = [p.text.strip() for shape in slide.placeholders if shape != slide.shapes.title and shape.has_text_frame
+                for p in shape.text_frame.paragraphs if p.text.strip()]
+        outline.append((title, body[:bullets]))
+    return outline
+
+
 def xlsx_table(content: bytes, rows: int = XLSX_ROWS):
     import pandas as pd
 
@@ -57,6 +72,8 @@ def build_preview(kind: ArtifactKind, content: bytes) -> Any:
         return docx_paragraphs(content)
     if kind == ArtifactKind.XLSX:
         return xlsx_table(content)
+    if kind == ArtifactKind.PPTX:
+        return pptx_outline(content)
     if kind in (ArtifactKind.PY, ArtifactKind.TXT, ArtifactKind.MD, ArtifactKind.JSON):
         return text_of(content)
     if kind == ArtifactKind.PNG:
@@ -100,6 +117,11 @@ def show_preview(art: Artifact, entry: CachedFile) -> None:
     elif art.kind == ArtifactKind.XLSX:
         st.caption(f"First {min(len(preview), XLSX_ROWS)} rows")
         st.dataframe(preview, hide_index=True, width="stretch", height=260)
+    elif art.kind == ArtifactKind.PPTX:
+        for number, (title, bullets) in enumerate(preview or [], start=1):
+            items = "".join(f"<li>{esc(b)}</li>" for b in bullets)
+            st.markdown(f"<p style='font-size:14px;margin:0'><b>{number}. {esc(title)}</b></p>"
+                        f"<ul style='font-size:13px;margin:0 0 6px 0'>{items}</ul>", unsafe_allow_html=True)
     elif art.kind == ArtifactKind.PY:
         st.code(preview, language="python", height=260)
     elif art.kind == ArtifactKind.PNG:
@@ -141,7 +163,7 @@ def entry_row(art: Artifact, first: bool) -> None:
 def tray(artifacts: list[Artifact]) -> None:
     st.markdown('<div class="wb-h tray">Deliverables</div>', unsafe_allow_html=True)
     if not artifacts:
-        st.markdown('<div class="wb-empty">Files the job produces (Word notes, Excel tag lists, code) '
+        st.markdown('<div class="wb-empty">Files the job produces (Word notes and reports, PowerPoint decks, Excel sheets, code) '
                     'appear here with a preview and a download button.</div>', unsafe_allow_html=True)
         return
     for i, art in enumerate(artifacts):
